@@ -1,6 +1,7 @@
 # app.py
 # NSE Relative Strength Leaders Scanner – Streamlit Version (TRADINGVIEW LINKS PERFECT)
 # Ram – Hyderabad – Jan 2026
+# Updated: Ability to switch between Full NSE and Nifty 50 only
 
 import streamlit as st
 import yfinance as yf
@@ -8,11 +9,8 @@ import pandas as pd
 import numpy as np
 import requests
 import io
-import time
-import random
 import warnings
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 warnings.filterwarnings("ignore")
 
@@ -23,11 +21,10 @@ BENCHMARK          = "^NSEI"
 RS_LOOKBACK        = 126
 MIN_RS_RANK        = 80
 MIN_LIQUIDITY_CR   = 5
-DEFAULT_MIN_MCAP   = 2000
-MAX_WORKERS        = 6
+MAX_WORKERS        = 6  # not actively used in current version but kept for future
 
 # ─────────────────────────────────────────────────────────────────────────────
-# NSE UNIVERSE
+# NSE FULL UNIVERSE
 # ─────────────────────────────────────────────────────────────────────────────
 
 @st.cache_resource(ttl=86400)
@@ -50,14 +47,36 @@ def load_nse_universe():
         return [], {}
 
 # ─────────────────────────────────────────────────────────────────────────────
-# RS Filter WITH TradingView LINKS
+# NIFTY 50 UNIVERSE
+# ─────────────────────────────────────────────────────────────────────────────
+
+@st.cache_resource(ttl=86400)
+def load_nifty50_symbols():
+    url = "https://archives.nseindia.com/content/indices/ind_nifty50list.csv"
+    try:
+        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+        r.raise_for_status()
+        df = pd.read_csv(io.StringIO(r.text))
+        if 'Symbol' in df.columns:
+            symbols = df['Symbol'].dropna().str.strip().tolist()
+            symbols = [s for s in symbols if s.isalpha() and len(s) >= 3]
+            return [s + '.NS' for s in symbols]
+        else:
+            st.warning("Nifty 50 CSV format issue - no 'Symbol' column")
+            return []
+    except Exception as e:
+        st.error(f"Failed to load Nifty 50 list: {str(e)[:80]}")
+        return []
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RS + RSI Filter
 # ─────────────────────────────────────────────────────────────────────────────
 
 def rs_filter(symbols, symbol_to_name, rs_lookback, min_rs_rank, min_liq_cr):
     with st.spinner("Computing Relative Strength + RSI..."):
         data = yf.download(
             symbols,
-            period="3y",               # ← increased to 3y → better for monthly RSI
+            period="3y",
             auto_adjust=True,
             group_by="ticker",
             threads=True,
@@ -86,12 +105,12 @@ def rs_filter(symbols, symbol_to_name, rs_lookback, min_rs_rank, min_liq_cr):
                     continue
                     
                 df = ticker_data.dropna(subset=['Close'])
-                if len(df) < max(lookback + 30, 60):   # enough for RS + decent RSI
+                if len(df) < max(lookback + 30, 60):
                     continue
 
                 close = df["Close"]
 
-                # ── Relative Strength ───────────────────────────────────────
+                # Relative Strength
                 current_price = float(close.iloc[-1])
                 ret = current_price / float(close.iloc[-lookback]) - 1
                 rs = ret / nifty_ret if nifty_ret != 0 else 0
@@ -102,7 +121,7 @@ def rs_filter(symbols, symbol_to_name, rs_lookback, min_rs_rank, min_liq_cr):
                 if current_price <= dma200 or liq_cr < min_liq_cr:
                     continue
 
-                # ── RSI calculations (using the same daily Close series) ─────
+                # RSI calculations
                 def compute_rsi(series, period=14):
                     if len(series) < period + 1:
                         return None
@@ -123,7 +142,7 @@ def rs_filter(symbols, symbol_to_name, rs_lookback, min_rs_rank, min_liq_cr):
                 monthly_close = close.resample('ME').last().dropna()
                 rsi_monthly = compute_rsi(monthly_close, 14) if len(monthly_close) >= 18 else None
 
-                # ── Build result row ────────────────────────────────────────
+                # Build result
                 clean_sym = sym.replace(".NS", "")
                 tv_url = f"https://in.tradingview.com/chart/?symbol=NSE%3A{clean_sym}"
 
@@ -152,56 +171,62 @@ def rs_filter(symbols, symbol_to_name, rs_lookback, min_rs_rank, min_liq_cr):
 
         return df_results
 
-
 # ─────────────────────────────────────────────────────────────────────────────
-# Compute RSI
-# ─────────────────────────────────────────────────────────────────────────────
-
-def compute_rsi(series, period=14):
-    delta = series.diff()
-    gain = delta.where(delta > 0, 0).fillna(0)
-    loss = -delta.where(delta < 0, 0).fillna(0)
-    
-    avg_gain = gain.rolling(period).mean()
-    avg_loss = loss.rolling(period).mean()
-    
-    # Wilder smoothing after first period
-    for i in range(period, len(series)):
-        avg_gain.iloc[i] = (avg_gain.iloc[i-1] * (period-1) + gain.iloc[i]) / period
-        avg_loss.iloc[i]  = (avg_loss.iloc[i-1]  * (period-1) + loss.iloc[i])  / period
-    
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.iloc[-1]
-
-# ─────────────────────────────────────────────────────────────────────────────
-# MAIN APP - PERFECT TradingView LINKS
+# MAIN APP
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main():
     st.title("NSE Relative Strength Leaders Scanner")
 
     with st.sidebar:
+        universe_mode = st.radio(
+            "Scan Universe",
+            options=["Full NSE (~2200+ stocks)", "Nifty 50 only"],
+            index=0,
+            help="Nifty 50 = faster scans, large-cap focus"
+        )
+
         rs_lookback = st.slider("RS Lookback (days)", 63, 252, RS_LOOKBACK, step=21)
         min_rs_rank = st.slider("Min RS Rank %", 60, 95, MIN_RS_RANK, step=5)
         min_liq_cr  = st.slider("Min Liquidity (Cr)", 1, 20, MIN_LIQUIDITY_CR, step=1)
         run_now     = st.button("Run Scan", type="primary", use_container_width=True)
 
-    symbols, name_map = load_nse_universe()
-    if not symbols:
+    # Load universes
+    full_symbols, full_name_map = load_nse_universe()
+    nifty50_symbols_raw = load_nifty50_symbols()
+
+    if not full_symbols:
         st.stop()
 
-    st.caption(f"Universe: {len(symbols):,} stocks")
+    # Select active universe
+    if universe_mode == "Nifty 50 only":
+        if not nifty50_symbols_raw:
+            st.warning("Nifty 50 list unavailable → using full universe")
+            symbols = full_symbols
+            name_map_active = full_name_map
+            universe_text = "Full NSE (fallback)"
+        else:
+            symbols = nifty50_symbols_raw
+            # Create name map only for Nifty 50 symbols
+            nifty_clean = [s.replace('.NS', '') for s in symbols]
+            name_map_active = {k: full_name_map.get(k, '') for k in nifty_clean}
+            universe_text = f"Nifty 50 ({len(symbols)} stocks)"
+    else:
+        symbols = full_symbols
+        name_map_active = full_name_map
+        universe_text = f"Full NSE ({len(symbols):,} stocks)"
+
+    st.caption(f"Universe: {universe_text}")
 
     if not run_now:
         st.info("Click Run Scan to start")
         return
 
-    # RS Filters
-    results = rs_filter(symbols, name_map, rs_lookback, min_rs_rank, min_liq_cr)
+    # Run the scan
+    results = rs_filter(symbols, name_map_active, rs_lookback, min_rs_rank, min_liq_cr)
 
     if results.empty:
-        st.warning("No stocks found")
+        st.warning(f"No stocks found in current universe")
         return
 
     st.subheader("Relative Strength Leaders + RSI")
@@ -209,12 +234,10 @@ def main():
     cols_to_show = ['Symbol', 'Name', 'Price', 'RS', 'LiquidityCr', 'RS_Rank',
                     'RSI_Daily', 'RSI_Weekly', 'RSI_Monthly']
 
-    # Your existing styling / color_rsi function remains the same
-    # Just make sure to handle None values in format as before
     def color_rsi(val):
         if not pd.api.types.is_number(val) or pd.isna(val):
             return ''
-        val = float(val)  # ensure it's float
+        val = float(val)
         if val >= 60:
             return 'background-color: #ffcccc'
         if val <= 40:
@@ -234,51 +257,15 @@ def main():
 
     st.dataframe(styled, use_container_width=True, hide_index=True)
 
-    # Update CSV too (now includes RSI columns)
-    csv_stage1 = results.to_csv(index=False).encode('utf-8')
+    # CSV Download
+    csv_data = results.to_csv(index=False).encode('utf-8')
     st.download_button(
         label="📥 Download CSV (with RSI columns)",
-        data=csv_stage1,
+        data=csv_data,
         file_name=f"RS_LEADERS_RSI_{datetime.now():%Y%m%d}.csv",
         mime="text/csv",
         use_container_width=True
     )
-
-    # if results.empty:
-    #     st.warning("No stocks found")
-    #     return
-
-    # st.subheader("Relative Strength Leaders")
-    
-    # # 🔥 CREATE CLICKABLE SYMBOL COLUMN (WORKS PERFECTLY)
-    # display_df = results.copy()
-    # # display_df['Symbol'] = display_df['Symbol'].apply(
-    # #     lambda x: f'[📊 {x}](https://in.tradingview.com/chart/?symbol=NSE%3A{x})'
-    # # )
-    
-    # # Show table WITHOUT TradingView column (cleaner display)
-    # cols_to_show = ['Symbol', 'Name', 'Price', 'RS', 'LiquidityCr', 'RS_Rank']
-    # st.dataframe(
-    #     display_df[cols_to_show].style.format({
-    #         'Price': '{:.2f}',
-    #         'RS': '{:.3f}', 
-    #         'LiquidityCr': '{:.1f}',
-    #         'RS_Rank': '{:.1f}%'
-    #     }).background_gradient(subset=['RS_Rank'], cmap='YlGn'),
-    #     use_container_width=True,
-    #     hide_index=True
-    # )
-
-    # # 🔥 CSV DOWNLOAD WITH TradingView URLs (complete data)
-    # csv_stage1 = results.to_csv(index=False).encode('utf-8')
-    # st.download_button(
-    #     label="📥 Download CSV (TradingView URLs included)",
-    #     data=csv_stage1,
-    #     file_name=f"RS_LEADERS_{datetime.now():%Y%m%d}.csv",
-    #     mime="text/csv",
-    #     use_container_width=True
-    # )
-
 
 if __name__ == "__main__":
     main()
