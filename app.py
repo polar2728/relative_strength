@@ -1,7 +1,7 @@
 # app.py
-# NSE Relative Strength Leaders Scanner – Streamlit Version (TRADINGVIEW LINKS PERFECT)
+# NSE Relative Strength Leaders Scanner – PRO Version
 # Ram – Hyderabad – Jan 2026
-# Updated: Ability to switch between Full NSE and Nifty 50 only
+# Fixed: NSE SERIES issue + True Log RS + RS Acceleration + Robust Benchmark Logic
 
 import streamlit as st
 import yfinance as yf
@@ -13,43 +13,69 @@ import warnings
 from datetime import datetime
 
 warnings.filterwarnings("ignore")
+st.set_page_config(page_title="NSE RS Leaders Scanner PRO", layout="wide")
 
-st.set_page_config(page_title="NSE RS Leaders Scanner", layout="wide")
+# ─────────────────────────────────────────────────────────────
+# CONFIG
+# ─────────────────────────────────────────────────────────────
+RS_LOOKBACK_6M = 126
+RS_LOOKBACK_3M = 63
+MIN_RS_RANK = 80
+MIN_LIQUIDITY_CR = 5
 
-# CONFIG ──────────────────────────────────────────────────────────────────────
-BENCHMARK          = "^NSEI"
-RS_LOOKBACK        = 126
-MIN_RS_RANK        = 80
-MIN_LIQUIDITY_CR   = 5
-MAX_WORKERS        = 6  # not actively used in current version but kept for future
+BENCHMARK_CANDIDATES = {
+    "Nifty 50": "^NSEI",
+    "Nifty Next 50": "^NSMIDCP",
+    "Nifty 100": "^CNX100",
+    "Nifty 200": "^CNX200",
+    "Nifty 500": "^CRSLDX",
+    "Nifty Midcap 150": "NIFTYMIDCAP150.NS",
+    "Nifty Total Market": "NIFTY_TOTAL_MKT.NS",
+}
 
-# ─────────────────────────────────────────────────────────────────────────────
-# NSE FULL UNIVERSE
-# ─────────────────────────────────────────────────────────────────────────────
-
+# ─────────────────────────────────────────────────────────────
+# LOAD NSE UNIVERSE (ROBUST)
+# ─────────────────────────────────────────────────────────────
 @st.cache_resource(ttl=86400)
 def load_nse_universe():
     url = "https://archives.nseindia.com/content/equities/EQUITY_L.csv"
     try:
         r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
         r.raise_for_status()
-        df = pd.read_csv(io.StringIO(r.text), header=0, encoding='utf-8-sig')
+
+        df = pd.read_csv(io.StringIO(r.text), encoding="utf-8-sig")
+
+        # 🔑 Critical fix
         df.columns = df.columns.str.strip().str.upper()
-        if 'SERIES' not in df.columns:
-            st.error("No 'SERIES' column")
+
+        if "SERIES" not in df.columns:
+            st.error("NSE file format changed: 'SERIES' column missing")
+            st.write("Columns found:", list(df.columns))
             return [], {}
-        df = df[df['SERIES'] == 'EQ']
-        df['Symbol'] = df['SYMBOL'].str.strip() + '.NS'
-        name_map = dict(zip(df['SYMBOL'], df['NAME OF COMPANY'].str.strip()))
-        return df['Symbol'].tolist(), name_map
+
+        df = df[df["SERIES"] == "EQ"]
+
+        if "SYMBOL" not in df.columns:
+            st.error("NSE file missing SYMBOL column")
+            return [], {}
+
+        df["Symbol"] = df["SYMBOL"].str.strip() + ".NS"
+
+        name_map = {}
+        if "NAME OF COMPANY" in df.columns:
+            name_map = dict(
+                zip(df["SYMBOL"].str.strip(), df["NAME OF COMPANY"].str.strip())
+            )
+
+        return df["Symbol"].tolist(), name_map
+
     except Exception as e:
-        st.error(f"Universe load failed: {str(e)[:80]}")
+        st.error(f"Universe load failed: {e}")
         return [], {}
 
-# ─────────────────────────────────────────────────────────────────────────────
-# NIFTY 50 UNIVERSE
-# ─────────────────────────────────────────────────────────────────────────────
-
+# ─────────────────────────────────────────────────────────────
+# LOAD NIFTY 50
+# ─────────────────────────────────────────────────────────────
 @st.cache_resource(ttl=86400)
 def load_nifty50_symbols():
     url = "https://archives.nseindia.com/content/indices/ind_nifty50list.csv"
@@ -57,215 +83,248 @@ def load_nifty50_symbols():
         r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
         r.raise_for_status()
         df = pd.read_csv(io.StringIO(r.text))
-        if 'Symbol' in df.columns:
-            symbols = df['Symbol'].dropna().str.strip().tolist()
-            symbols = [s for s in symbols if s.isalpha() and len(s) >= 3]
-            return [s + '.NS' for s in symbols]
-        else:
-            st.warning("Nifty 50 CSV format issue - no 'Symbol' column")
-            return []
-    except Exception as e:
-        st.error(f"Failed to load Nifty 50 list: {str(e)[:80]}")
+        return [s.strip() + ".NS" for s in df["Symbol"].dropna()]
+    except Exception:
         return []
 
-# ─────────────────────────────────────────────────────────────────────────────
-# RS + RSI Filter
-# ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
+# INDICATORS
+# ─────────────────────────────────────────────────────────────
+def compute_rsi(series, period=14):
+    delta = series.diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(period).mean()
+    avg_loss = loss.rolling(period).mean()
+    rs = avg_gain / avg_loss
+    return round((100 - (100 / (1 + rs))).iloc[-1], 1)
 
-def rs_filter(symbols, symbol_to_name, rs_lookback, min_rs_rank, min_liq_cr):
-    with st.spinner("Computing Relative Strength + RSI..."):
-        data = yf.download(
-            symbols,
-            period="3y",
-            auto_adjust=True,
-            group_by="ticker",
-            threads=True,
-            progress=False
-        )
+def log_rs(price_now, price_then, bm_now, bm_then):
+    return np.log(price_now / price_then) - np.log(bm_now / bm_then)
 
-        nifty = yf.download(
-            BENCHMARK,
-            period="3y",
-            auto_adjust=True,
-            progress=False
-        )
+# ─────────────────────────────────────────────────────────────
+# RS SCAN LOGIC
+# ─────────────────────────────────────────────────────────────
+def rs_scan(symbols, name_map, min_rs_rank, min_liq, benchmark_mode):
 
-        lookback = min(rs_lookback, len(nifty) - 30)
-        nifty_ret = float(nifty["Close"].iloc[-1] / nifty["Close"].iloc[-lookback] - 1) if len(nifty) > lookback else 0
+    status = st.empty()
+    progress = st.progress(0)
 
-        results = []
+    status.info("📥 Downloading stock data…")
+    progress.progress(10)
+    
+    # with st.spinner("Downloading market data…"):
+    stock_data = yf.download(
+        symbols, period="3y", auto_adjust=True,
+        group_by="ticker", threads=True, progress=False
+    )
+    status.info("📊 Evaluating benchmarks…")
+    progress.progress(25)
 
-        for sym in symbols:
-            if sym not in data.columns.levels[0]:
-                continue
+    bm_data = yf.download(
+        list(BENCHMARK_CANDIDATES.values()),
+        period="3y", auto_adjust=True,
+        group_by="ticker", progress=False
+    )
 
-            try:
-                ticker_data = data[sym]
-                if ticker_data is None or ticker_data.empty:
-                    continue
-                    
-                df = ticker_data.dropna(subset=['Close'])
-                if len(df) < max(lookback + 30, 60):
-                    continue
+# ───────── Benchmark selection ─────────
+    bm_rows = []
+    selected_df = None
+    selected_name = None
+    best_ret = -1e9
 
-                close = df["Close"]
+    for name, ticker in BENCHMARK_CANDIDATES.items():
+        if ticker not in bm_data.columns.levels[0]:
+            continue
 
-                # Relative Strength
-                current_price = float(close.iloc[-1])
-                ret = current_price / float(close.iloc[-lookback]) - 1
-                rs = ret / nifty_ret if nifty_ret != 0 else 0
+        df = bm_data[ticker].dropna()
+        if len(df) < RS_LOOKBACK_6M + 5:
+            continue
 
-                dma200 = float(close.rolling(200).mean().iloc[-1])
-                liq_cr = float((close * df["Volume"]).tail(30).mean() / 1e7)
+        close_bm = df["Close"]  # keep Series
+        ret6m = (close_bm.iloc[-1] / close_bm.iloc[-RS_LOOKBACK_6M] - 1) * 100
+        bm_rows.append((name, ticker, round(ret6m, 2)))
 
-                if current_price <= dma200 or liq_cr < min_liq_cr:
-                    continue
+        if benchmark_mode == "Auto" and ret6m > best_ret:
+            best_ret = ret6m
+            selected_name = name
+            selected_df = df
 
-                # RSI calculations
-                def compute_rsi(series, period=14):
-                    if len(series) < period + 1:
-                        return None
-                    delta = series.diff()
-                    gain = delta.where(delta > 0, 0)
-                    loss = -delta.where(delta < 0, 0)
-                    avg_gain = gain.rolling(window=period, min_periods=period).mean()
-                    avg_loss = loss.rolling(window=period, min_periods=period).mean()
-                    rs_val = avg_gain / avg_loss
-                    rsi = 100 - (100 / (1 + rs_val))
-                    return round(rsi.iloc[-1], 1)
+    if benchmark_mode == "Fixed Nifty 500":
+        selected_name = "Nifty 500"
+        selected_df = bm_data["^CRSLDX"].dropna()
 
-                rsi_daily = compute_rsi(close, 14)
+    st.subheader("Benchmark Comparison (6M)")
+    bm_df = pd.DataFrame(bm_rows, columns=["Benchmark", "Ticker", "6M Return %"]) \
+             .sort_values("6M Return %", ascending=False)
+    st.dataframe(bm_df, hide_index=True)
+    st.success(f"Selected Benchmark: **{selected_name}**")
 
-                weekly_close = close.resample('W-FRI').last().dropna()
-                rsi_weekly = compute_rsi(weekly_close, 14) if len(weekly_close) >= 20 else None
+    status.success(f"✅ Selected Benchmark: {selected_name}")
+    progress.progress(35)
 
-                monthly_close = close.resample('ME').last().dropna()
-                rsi_monthly = compute_rsi(monthly_close, 14) if len(monthly_close) >= 18 else None
+    # ───────── Stock loop ─────────
+    results = []
+    total = len(symbols)
 
-                # Build result
-                clean_sym = sym.replace(".NS", "")
-                tv_url = f"https://in.tradingview.com/chart/?symbol=NSE%3A{clean_sym}"
+    status.info("🔎 Scanning stocks…")
 
-                results.append({
-                    "Symbol": clean_sym,
-                    "Name": symbol_to_name.get(clean_sym, ""),
-                    "Price": round(current_price, 2),
-                    "RS": round(rs, 3),
-                    "LiquidityCr": round(liq_cr, 1),
-                    "RSI_Daily": rsi_daily,
-                    "RSI_Weekly": rsi_weekly,
-                    "RSI_Monthly": rsi_monthly,
-                    "TradingView": tv_url
-                })
+    for i, sym in enumerate(symbols):
+        if sym not in stock_data.columns.levels[0]:
+            continue
 
-            except Exception:
-                continue
+        if i % 25 == 0:
+            progress.progress(35 + int(55 * i / total))
+            status.info(f"🔎 Scanning… {i}/{total}")
 
-        df_results = pd.DataFrame(results)
-        if df_results.empty:
-            return df_results
+        df = stock_data[sym].dropna()
+        if len(df) < 250:
+            continue
 
-        df_results["RS_Rank"] = df_results["RS"].rank(pct=True) * 100
-        df_results = df_results[df_results["RS_Rank"] >= min_rs_rank]
-        df_results = df_results.sort_values("RS_Rank", ascending=False).reset_index(drop=True)
+        close = df["Close"]           # Series – never overwrite with scalar
+        price = close.iloc[-1]
 
-        return df_results
+        dma200 = close.rolling(200).mean().iloc[-1]
+        liq = (close * df["Volume"]).tail(30).mean() / 1e7
 
-# ─────────────────────────────────────────────────────────────────────────────
+        if price < dma200 or liq < min_liq:
+            continue
+
+        # Benchmark Series – keep separate
+        bm_close = selected_df["Close"]
+
+        # Compute returns without overwriting Series
+        bm_ret_3m = (bm_close.iloc[-1] / bm_close.iloc[-RS_LOOKBACK_3M] - 1)
+        bm_ret_6m = (bm_close.iloc[-1] / bm_close.iloc[-RS_LOOKBACK_6M] - 1)
+
+        # Stock returns
+        stock_ret_6m = price / close.iloc[-RS_LOOKBACK_6M] - 1
+        stock_ret_3m = price / close.iloc[-RS_LOOKBACK_3M] - 1
+
+        # Log RS
+        rs6 = log_rs(price, close.iloc[-RS_LOOKBACK_6M],
+                     bm_close.iloc[-1], bm_close.iloc[-RS_LOOKBACK_6M])
+
+        rs3 = log_rs(price, close.iloc[-RS_LOOKBACK_3M],
+                     bm_close.iloc[-1], bm_close.iloc[-RS_LOOKBACK_3M])
+
+        rs_delta = rs3 - rs6
+
+        rsi_d = compute_rsi(close)
+        rsi_w = compute_rsi(close.resample("W-FRI").last()) if len(close) > 100 else None
+        rsi_m = compute_rsi(close.resample("ME").last()) if len(close) > 400 else None
+
+        clean = sym.replace(".NS", "")
+        tv = f"https://in.tradingview.com/chart/?symbol=NSE%3A{clean}"
+
+        results.append({
+            "Symbol": clean,  # fixed typo: sym_clean → clean
+            "Name": name_map.get(clean, ""),
+            "Price": round(price, 2),
+            "RS": round(rs6, 3),          # using 6M as main RS (adjust if needed)
+            "RS_3M": round(rs3, 3),
+            "RS_6M": round(rs6, 3),
+            "RS_Delta": round(rs_delta, 3),
+            "LiquidityCr": round(liq, 1),
+            "RSI_D": rsi_d,
+            "RSI_W": rsi_w,
+            "RSI_M": rsi_m,
+            "Chart": tv
+        })
+
+    progress.progress(95)
+    status.info("📐 Ranking…")
+
+    df = pd.DataFrame(results)
+    if df.empty:
+        return df
+
+    df["RS_Rank"] = df["RS_6M"].rank(pct=True) * 100
+    df["Momentum"] = np.where(df["RS_Delta"] > 0, "Improving",
+                       np.where(df["RS_Delta"] < 0, "Decelerating", "Stable"))
+
+    df = df[df["RS_Rank"] >= min_rs_rank]
+    df = df.sort_values("RS_Rank", ascending=False)
+
+    progress.progress(100)
+    status.success("✅ Scan complete")
+
+
+    return df.reset_index(drop=True)
+
+# ───────── UI ─────────
+def color_rsi(val):
+    if pd.isna(val):
+        return ""
+    if val >= 60:
+        return "background-color: #ffcccc"
+    if val <= 40:
+        return "background-color: #ccffcc"
+    return ""
+
+# ─────────────────────────────────────────────────────────────
 # MAIN APP
-# ─────────────────────────────────────────────────────────────────────────────
-
+# ─────────────────────────────────────────────────────────────
 def main():
-    st.title("NSE Relative Strength Leaders Scanner")
+    st.title("NSE Relative Strength Leaders Scanner – PRO")
 
     with st.sidebar:
-        universe_mode = st.radio(
-            "Scan Universe",
-            options=["Full NSE (~2200+ stocks)", "Nifty 50 only"],
-            index=0,
-            help="Nifty 50 = faster scans, large-cap focus"
-        )
+        universe = st.radio("Universe", ["Full NSE", "Nifty 50"])
+        benchmark_mode = st.radio("Benchmark Mode", ["Auto", "Fixed Nifty 500"])
+        min_rs = st.slider("Min RS Rank", 60, 95, MIN_RS_RANK)
+        min_liq = st.slider("Min Liquidity (Cr)", 1, 20, MIN_LIQUIDITY_CR)
+        run = st.button("Run Scan", type="primary")
 
-        rs_lookback = st.slider("RS Lookback (days)", 63, 252, RS_LOOKBACK, step=21)
-        min_rs_rank = st.slider("Min RS Rank %", 60, 95, MIN_RS_RANK, step=5)
-        min_liq_cr  = st.slider("Min Liquidity (Cr)", 1, 20, MIN_LIQUIDITY_CR, step=1)
-        run_now     = st.button("Run Scan", type="primary", use_container_width=True)
-
-    # Load universes
-    full_symbols, full_name_map = load_nse_universe()
-    nifty50_symbols_raw = load_nifty50_symbols()
-
-    if not full_symbols:
+    full_syms, name_map = load_nse_universe()
+    if not full_syms:
         st.stop()
 
-    # Select active universe
-    if universe_mode == "Nifty 50 only":
-        if not nifty50_symbols_raw:
-            st.warning("Nifty 50 list unavailable → using full universe")
-            symbols = full_symbols
-            name_map_active = full_name_map
-            universe_text = "Full NSE (fallback)"
-        else:
-            symbols = nifty50_symbols_raw
-            # Create name map only for Nifty 50 symbols
-            nifty_clean = [s.replace('.NS', '') for s in symbols]
-            name_map_active = {k: full_name_map.get(k, '') for k in nifty_clean}
-            universe_text = f"Nifty 50 ({len(symbols)} stocks)"
-    else:
-        symbols = full_symbols
-        name_map_active = full_name_map
-        universe_text = f"Full NSE ({len(symbols):,} stocks)"
+    nifty50 = load_nifty50_symbols()
+    symbols = full_syms if universe == "Full NSE" else nifty50
 
-    st.caption(f"Universe: {universe_text}")
+    if run:
+        df = rs_scan(symbols, name_map, min_rs, min_liq, benchmark_mode)
 
-    if not run_now:
-        st.info("Click Run Scan to start")
-        return
+        if df.empty:
+            st.warning("No stocks passed filters")
+            return
 
-    # Run the scan
-    results = rs_filter(symbols, name_map_active, rs_lookback, min_rs_rank, min_liq_cr)
+        # ── Create styled DataFrame FIRST ──
+        def rsi_color(v):
+            if pd.isna(v): return ""
+            if v >= 60: return "background-color:#ccffcc"
+            if v <= 40: return "background-color:#ffcccc"
+            return ""
 
-    if results.empty:
-        st.warning(f"No stocks found in current universe")
-        return
+        styled = df.style.format({
+            "RS_6M": "{:.3f}",
+            "RS_3M": "{:.3f}",
+            "RS_Accel": "{:.3f}",
+            "RS_Rank": "{:.1f}%"
+        }).background_gradient(subset=["RS_Rank"], cmap="YlGn") \
+          .map(rsi_color, subset=["RSI_D", "RSI_W", "RSI_M"])
 
-    st.subheader("Relative Strength Leaders + RSI")
+        # ── Now display it ──
+        st.dataframe(
+            styled,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "Chart": st.column_config.LinkColumn(
+                    "Chart", display_text="📈 View"
+                )
+            }
+        )
 
-    cols_to_show = ['Symbol', 'Name', 'Price', 'RS', 'LiquidityCr', 'RS_Rank',
-                    'RSI_Daily', 'RSI_Weekly', 'RSI_Monthly']
-
-    def color_rsi(val):
-        if not pd.api.types.is_number(val) or pd.isna(val):
-            return ''
-        val = float(val)
-        if val >= 60:
-            return 'background-color: #ffcccc'
-        if val <= 40:
-            return 'background-color: #ccffcc'
-        return ''
-
-    styled = results[cols_to_show].style.format({
-        'Price': lambda x: f"{x:.2f}" if pd.notna(x) else "–",
-        'RS': lambda x: f"{x:.3f}" if pd.notna(x) else "–",
-        'LiquidityCr': lambda x: f"{x:.1f}" if pd.notna(x) else "–",
-        'RS_Rank': lambda x: f"{x:.1f}%" if pd.notna(x) else "–",
-        'RSI_Daily': lambda x: f"{x:.1f}" if pd.notna(x) else "–",
-        'RSI_Weekly': lambda x: f"{x:.1f}" if pd.notna(x) else "–",
-        'RSI_Monthly': lambda x: f"{x:.1f}" if pd.notna(x) else "–",
-    }).background_gradient(subset=['RS_Rank'], cmap='YlGn')\
-      .map(color_rsi, subset=['RSI_Daily', 'RSI_Weekly', 'RSI_Monthly'])
-
-    st.dataframe(styled, use_container_width=True, hide_index=True)
-
-    # CSV Download
-    csv_data = results.to_csv(index=False).encode('utf-8')
-    st.download_button(
-        label="📥 Download CSV (with RSI columns)",
-        data=csv_data,
-        file_name=f"RS_LEADERS_RSI_{datetime.now():%Y%m%d}.csv",
-        mime="text/csv",
-        use_container_width=True
-    )
+        # CSV download
+        csv = df.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            "📥 Download CSV",
+            csv,
+            f"RS_LEADERS_PRO_{datetime.now():%Y%m%d}.csv",
+            mime="text/csv",
+            width="stretch"
+        )
 
 if __name__ == "__main__":
     main()
