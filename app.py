@@ -306,7 +306,7 @@ def main():
             "RSI_D"     : "{:.1f}",
             "RSI_W"     : "{:.1f}",
             "RSI_M"     : "{:.1f}",
-        }).background_gradient(subset=["RS_Rank"], cmap="YlGn")
+        }).background_gradient(subset=["RS_Rank"], cmap="YlGn") \
         .map(rsi_color, subset=["RSI_D", "RSI_W", "RSI_M"])
 
         # ── Now display it ──
