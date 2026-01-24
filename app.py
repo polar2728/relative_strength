@@ -297,17 +297,18 @@ def main():
             return ""
 
         styled = df.style.format({
-            "Price"     : "{:,.2f}",           # 2 decimals + thousand separator
-            "RS_6M"     : "{:.3f}",
-            "RS_3M"     : "{:.3f}",
-            "RS_Delta"  : "{:.3f}",
-            "RS_Rank"   : "{:.1f}%",
-            "LiquidityCr": "{:.1f}",
+            "Price": "{:.2f}",
+            "RS": "{:.3f}",
+            "RS_6M": "{:.3f}",
+            "RS_3M": "{:.3f}",
+            "RS_Delta": "{:.3f}",
+            "LiquidityCr": "{:.2f}",
             "RSI_D"     : "{:.1f}",
             "RSI_W"     : "{:.1f}",
             "RSI_M"     : "{:.1f}",
+            "RS_Rank": "{:.1f}%"
         }).background_gradient(subset=["RS_Rank"], cmap="YlGn") \
-        .map(rsi_color, subset=["RSI_D", "RSI_W", "RSI_M"])
+          .map(rsi_color, subset=["RSI_D", "RSI_W", "RSI_M"])
 
         # ── Now display it ──
         st.dataframe(
