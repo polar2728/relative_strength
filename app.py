@@ -33,21 +33,12 @@ BENCHMARK_CANDIDATES = {
 
 
 def kite_login_ui():
-    if "kite" in st.session_state:
-        return
+    st.markdown("## 🔐 Zerodha Login Required")
 
-    login_url = (
-        "https://kite.zerodha.com/connect/login"
-        f"?api_key={st.secrets['KITE_API_KEY']}"
-        f"&v=3&redirect_uri={st.secrets['REDIRECT_URL']}"
+    st.link_button(
+        "Login with Kite",
+        "https://kite-callback.streamlit.app"
     )
-
-    st.sidebar.markdown("### 🔐 Zerodha Login")
-    st.sidebar.markdown(
-        f"<a href='{login_url}' target='_self'>🔑 Login with Kite</a>",
-        unsafe_allow_html=True
-    )
-    st.stop()
 
 
 def handle_kite_callback():
