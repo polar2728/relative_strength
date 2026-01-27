@@ -31,50 +31,28 @@ BENCHMARK_CANDIDATES = {
     "Nifty Total Market": "NIFTY TOTAL MARKET",
 }
 
-
-def kite_login_ui():
-    if "kite" in st.session_state:
-        return
-
-    login_url = (
-        "https://kite.zerodha.com/connect/login"
-        f"?api_key={st.secrets['KITE_API_KEY']}"
-        f"&v=3&redirect_uri=https://rs-scanner.streamlit.app/"  # Your exact app URL
-    )
-
-    st.sidebar.markdown("### 🔐 Zerodha Login")
-    st.sidebar.markdown(
-        f"""
-        <div style='padding: 1rem; background: #f8f9fa; border-radius: 8px; border-left: 4px solid #10b981;'>
-            <a href='{login_url}' target='_blank' 
-               style='color: #10b981; text-decoration: none; font-weight: 600; font-size: 16px;'>
-                🔑 Login with Kite (New Tab)
-            </a>
-            <p style='margin: 8px 0 0 0; font-size: 12px; color: #6b7280;'>
-                After login, return to this tab
-            </p>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-    st.stop()
-
-
-def handle_kite_callback():
-    if "kite" in st.session_state:
-        return
-    params = st.query_params
-    request_token = params.get("request_token")
-    if request_token and request_token != "None":  # Handle empty strings
-        try:
-            kite = KiteConnect(api_key=st.secrets["KITE_API_KEY"])
-            data = kite.generate_session(request_token, st.secrets["KITE_API_SECRET"])
-            kite.set_access_token(data["access_token"])
-            st.session_state.kite = kite
-            st.session_state.access_token = data["access_token"]
-        except Exception as e:
-            st.error(f"Auth failed: {e}")
-    st.query_params.clear()  # Always clear to prevent param loops
+# ─────────────────────────────────────────────────────────────
+# CLOUD SECRETS AUTH - NO USER INPUT REQUIRED
+# ─────────────────────────────────────────────────────────────
+def get_kite_from_secrets():
+    """Get pre-configured Kite from Streamlit secrets"""
+    try:
+        # Access secrets set in Streamlit Cloud dashboard
+        api_key = st.secrets["KITE_API_KEY"]
+        access_token = st.secrets["KITE_ACCESS_TOKEN"]  # Your 24h token
+        
+        kite = KiteConnect(api_key=api_key)
+        kite.set_access_token(access_token)
+        
+        # Quick validation
+        profile = kite.profile()
+        
+        st.sidebar.success(f"✅ Connected: {profile['user_name']}")
+        return kite
+        
+    except Exception as e:
+        st.sidebar.error(f"❌ Auth failed: Update secrets → {str(e)[:50]}")
+        return None
 
 # ─────────────────────────────────────────────────────────────
 # KITE AUTH
@@ -366,14 +344,12 @@ def main():
     </div>
     """, unsafe_allow_html=True)
 
-    # kite = kite_auth_section()
-    handle_kite_callback()  # 1️⃣ Check for callback first
-    kite_login_ui()         # 2️⃣ Show login if no kite session
-    
-    kite = st.session_state.get("kite")
-
+    # Single line auth - works instantly or shows clear error
+    kite = get_kite_from_secrets()
     if not kite:
+        st.error("⚠️ Admin: Update KITE_ACCESS_TOKEN in Streamlit Cloud settings")
         st.stop()
+    
 
     st.sidebar.markdown("### ⚙️ Scan Config")
     universe = st.sidebar.radio("Universe", ["Nifty 50", "Full NSE"])
