@@ -33,14 +33,26 @@ BENCHMARK_CANDIDATES = {
 
 
 def kite_login_ui():
-    kite = KiteConnect(api_key=st.secrets["KITE_API_KEY"])
+    api_key = st.secrets["KITE_API_KEY"]
+    redirect_url = st.secrets["REDIRECT_URL"]
 
-    st.link_button(
-        "🔐 Login with Zerodha Kite",
-        kite.login_url()
+    login_url = (
+        f"https://kite.zerodha.com/connect/login?"
+        f"api_key={api_key}&v=3&redirect_uri={urllib.parse.quote(redirect_url)}"
     )
 
+    # if "access_token" not in st.session_state:
+    #     st.sidebar.markdown("### 🔐 Login to Zerodha")
+    #     st.sidebar.markdown(
+    #         f"<a href='{login_url}' target='_self'>🔑 Login with Kite</a>",
+    #         unsafe_allow_html=True
+    #     )
+    #     st.stop()
 
+    st.sidebar.markdown(
+        f"<a href='{login_url}' target='_blank'>🔑 Login with Kite</a>",
+        unsafe_allow_html=True
+    )
 
 def handle_kite_callback():
     if "kite" in st.session_state:
@@ -57,7 +69,6 @@ def handle_kite_callback():
         except Exception as e:
             st.error(f"Auth failed: {e}")
     st.query_params.clear()  # Always clear to prevent param loops
-
 
 # ─────────────────────────────────────────────────────────────
 # KITE AUTH
@@ -336,28 +347,6 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode):
         bm_table
     )
 
-def consume_kite_token_once():
-    params = st.experimental_get_query_params()
-
-    if "code" not in params or "kite" in st.session_state:
-        return
-
-    code = params["code"][0]
-
-    # Fetch token from callback app
-    import requests
-    resp = requests.get(
-        f"https://kc-rs-scanner.streamlit.app/get_token?code={code}",
-        timeout=5
-    )
-
-    access_token = resp.text.strip()
-
-    kite = KiteConnect(api_key=st.secrets["KITE_API_KEY"])
-    kite.set_access_token(access_token)
-    st.session_state.kite = kite
-
-
 
 # ─────────────────────────────────────────────────────────────
 # MAIN
@@ -372,20 +361,13 @@ def main():
     """, unsafe_allow_html=True)
 
     # kite = kite_auth_section()
-    # 1️⃣ Consume token ONCE (already discussed)
-    consume_kite_token_once()
+    kite_login_ui()
+    handle_kite_callback()
+    kite = get_kite()
 
-    # 2️⃣ If Kite not ready → show login UI and STOP
-    if "kite" not in st.session_state:
-        kite_login_ui()
+
+    if not kite:
         st.stop()
-
-    # 3️⃣ Kite is ready → proceed with scanner
-    kite = st.session_state.kite
-
-    # kite = st.session_state.get("kite")
-    # if not kite:
-    #     st.stop()
 
     st.sidebar.markdown("### ⚙️ Scan Config")
     universe = st.sidebar.radio("Universe", ["Nifty 50", "Full NSE"])
