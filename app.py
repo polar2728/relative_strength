@@ -33,35 +33,43 @@ BENCHMARK_CANDIDATES = {
 
 
 def kite_login_ui():
-    api_key = st.secrets["KITE_API_KEY"]
-    redirect_url = st.secrets["REDIRECT_URL"]
+    if "kite" in st.session_state:
+        return
 
     login_url = (
-        f"https://kite.zerodha.com/connect/login?"
-        f"api_key={api_key}&v=3&redirect_uri={urllib.parse.quote(redirect_url)}"
+        "https://kite.zerodha.com/connect/login"
+        f"?api_key={st.secrets['KITE_API_KEY']}"
+        f"&v=3&redirect_uri={st.secrets['REDIRECT_URL']}"
     )
 
-    if "access_token" not in st.session_state:
-        st.sidebar.markdown("### 🔐 Login to Zerodha")
-        st.sidebar.markdown(
-            f"<a href='{login_url}' target='_self'>🔑 Login with Kite</a>",
-            unsafe_allow_html=True
-        )
-        st.stop()
+    st.sidebar.markdown("### 🔐 Zerodha Login")
+    st.sidebar.markdown(
+        f"<a href='{login_url}' target='_self'>🔑 Login with Kite</a>",
+        unsafe_allow_html=True
+    )
+    st.stop()
+
 
 def handle_kite_callback():
-    api_key = st.secrets["KITE_API_KEY"]
-    api_secret = st.secrets["KITE_API_SECRET"]
+    if "kite" in st.session_state:
+        return
 
     params = st.query_params
     request_token = params.get("request_token")
 
-    if request_token and "access_token" not in st.session_state:
-        kite = KiteConnect(api_key=api_key)
-        data = kite.generate_session(request_token, api_secret)
-        st.session_state.access_token = data["access_token"]
-        st.session_state.kite = kite
+    if request_token:
+        kite = KiteConnect(api_key=st.secrets["KITE_API_KEY"])
+        data = kite.generate_session(
+            request_token,
+            st.secrets["KITE_API_SECRET"]
+        )
         kite.set_access_token(data["access_token"])
+
+        st.session_state.kite = kite
+        st.session_state.access_token = data["access_token"]
+
+        # 🚨 THIS PREVENTS REDIRECT LOOP
+        st.query_params.clear()
         st.rerun()
 
 # ─────────────────────────────────────────────────────────────
@@ -355,14 +363,13 @@ def main():
     """, unsafe_allow_html=True)
 
     # kite = kite_auth_section()
-    kite_login_ui()
     handle_kite_callback()
-    kite = get_kite()
+    kite_login_ui()
 
-
+    kite = st.session_state.get("kite")
     if not kite:
         st.stop()
-
+        
     st.sidebar.markdown("### ⚙️ Scan Config")
     universe = st.sidebar.radio("Universe", ["Nifty 50", "Full NSE"])
     benchmark_mode = st.sidebar.radio("Benchmark", ["Auto"])
