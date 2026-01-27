@@ -37,7 +37,7 @@ def kite_login_ui():
 
     st.link_button(
         "Login with Kite",
-        "https://kite-callback.streamlit.app"
+        "https://kc-rs-scanner.streamlit.app"
     )
 
 
