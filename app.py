@@ -344,6 +344,23 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode):
         bm_table
     )
 
+def consume_kite_token_once():
+    from streamlit.runtime.scriptrunner import get_script_run_ctx
+
+    # ---- CONSUME KITE TOKEN ONCE ----
+    if "kite" not in st.session_state:
+        params = st.query_params
+
+        if "kite_token" in params:
+            kite = KiteConnect(api_key=KITE_API_KEY)
+            kite.set_access_token(params["kite_token"])
+
+            st.session_state.kite = kite
+
+            # 🔥 Clear token from URL immediately
+            st.query_params.clear()
+
+            st.rerun()
 
 # ─────────────────────────────────────────────────────────────
 # MAIN
@@ -358,12 +375,20 @@ def main():
     """, unsafe_allow_html=True)
 
     # kite = kite_auth_section()
-    handle_kite_callback()
-    kite_login_ui()
+    # 1️⃣ Consume token ONCE (already discussed)
+    consume_kite_token_once()
 
-    kite = st.session_state.get("kite")
-    if not kite:
+    # 2️⃣ If Kite not ready → show login UI and STOP
+    if "kite" not in st.session_state:
+        kite_login_ui()
         st.stop()
+
+    # 3️⃣ Kite is ready → proceed with scanner
+    kite = st.session_state.kite
+
+    # kite = st.session_state.get("kite")
+    # if not kite:
+    #     st.stop()
 
     st.sidebar.markdown("### ⚙️ Scan Config")
     universe = st.sidebar.radio("Universe", ["Nifty 50", "Full NSE"])
