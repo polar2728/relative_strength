@@ -33,12 +33,13 @@ BENCHMARK_CANDIDATES = {
 
 
 def kite_login_ui():
-    st.markdown("## 🔐 Zerodha Login Required")
+    kite = KiteConnect(api_key=st.secrets["KITE_API_KEY"])
 
     st.link_button(
-        "Login with Kite",
-        "https://kc-rs-scanner.streamlit.app"
+        "🔐 Login with Zerodha Kite",
+        kite.login_url()
     )
+
 
 
 def handle_kite_callback():
@@ -336,22 +337,13 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode):
     )
 
 def consume_kite_token_once():
-    from streamlit.runtime.scriptrunner import get_script_run_ctx
+    params = st.experimental_get_query_params()
 
-    # ---- CONSUME KITE TOKEN ONCE ----
-    if "kite" not in st.session_state:
-        params = st.query_params
+    if "access_token" in params and "kite" not in st.session_state:
+        kite = KiteConnect(api_key=st.secrets["KITE_API_KEY"])
+        kite.set_access_token(params["access_token"][0])
+        st.session_state.kite = kite
 
-        if "kite_token" in params:
-            kite = KiteConnect(api_key=KITE_API_KEY)
-            kite.set_access_token(params["kite_token"])
-
-            st.session_state.kite = kite
-
-            # 🔥 Clear token from URL immediately
-            st.query_params.clear()
-
-            st.rerun()
 
 # ─────────────────────────────────────────────────────────────
 # MAIN
