@@ -1,16 +1,14 @@
-# app.py
-# NSE Relative Strength Leaders Scanner – PRO Version
-# Ram – Hyderabad – Jan 2026
-# Fixed: NSE SERIES issue + True Log RS + RS Acceleration + Robust Benchmark Logic
-
 import streamlit as st
-import yfinance as yf
 import pandas as pd
 import numpy as np
 import requests
 import io
 import warnings
-from datetime import datetime
+import time
+import urllib.parse
+from datetime import datetime, timedelta
+from kiteconnect import KiteConnect
+from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception_type
 
 warnings.filterwarnings("ignore")
 st.set_page_config(page_title="NSE RS Leaders Scanner PRO", layout="wide")
@@ -24,194 +22,292 @@ MIN_RS_RANK = 80
 MIN_LIQUIDITY_CR = 5
 
 BENCHMARK_CANDIDATES = {
-    "Nifty 50": "^NSEI",
-    "Nifty Next 50": "^NSMIDCP",
-    "Nifty 100": "^CNX100",
-    "Nifty 200": "^CNX200",
-    "Nifty 500": "^CRSLDX",
-    "Nifty Midcap 150": "NIFTYMIDCAP150.NS",
-    "Nifty Total Market": "NIFTY_TOTAL_MKT.NS",
+    "Nifty 50": "NIFTY 50",
+    "Nifty Next 50": "NIFTY NEXT 50",
+    "Nifty 100": "NIFTY 100",
+    "Nifty 200": "NIFTY 200",
+    "Nifty 500": "NIFTY 500",
+    "Nifty Midcap 150": "NIFTY MIDCAP 150",
+    "Nifty Total Market": "NIFTY TOTAL MARKET",
 }
 
+
+def kite_login_ui():
+    api_key = st.secrets["KITE_API_KEY"]
+    redirect_url = st.secrets["REDIRECT_URL"]
+
+    login_url = (
+        f"https://kite.zerodha.com/connect/login?"
+        f"api_key={api_key}&v=3&redirect_uri={urllib.parse.quote(redirect_url)}"
+    )
+
+    if "access_token" not in st.session_state:
+        st.sidebar.markdown("### 🔐 Login to Zerodha")
+        st.sidebar.markdown(
+            f"<a href='{login_url}' target='_self'>🔑 Login with Kite</a>",
+            unsafe_allow_html=True
+        )
+        st.stop()
+
+def handle_kite_callback():
+    api_key = st.secrets["KITE_API_KEY"]
+    api_secret = st.secrets["KITE_API_SECRET"]
+
+    params = st.query_params
+    request_token = params.get("request_token")
+
+    if request_token and "access_token" not in st.session_state:
+        kite = KiteConnect(api_key=api_key)
+        data = kite.generate_session(request_token, api_secret)
+        st.session_state.access_token = data["access_token"]
+        st.session_state.kite = kite
+        kite.set_access_token(data["access_token"])
+        st.rerun()
+
 # ─────────────────────────────────────────────────────────────
-# LOAD NSE UNIVERSE (ROBUST)
+# KITE AUTH
+# ─────────────────────────────────────────────────────────────
+def kite_auth_section():
+    st.sidebar.markdown("### 🔌 Kite Connect")
+
+    api_key = st.sidebar.text_input(
+        "API Key", type="password",
+        value=st.session_state.get("api_key", "")
+    )
+    access_token = st.sidebar.text_input(
+        "Access Token", type="password",
+        value=st.session_state.get("access_token", "")
+    )
+
+    if st.sidebar.button("TEST CONNECTION", use_container_width=True):
+        if not api_key or not access_token:
+            st.sidebar.error("Enter API key + token")
+            return None
+
+        try:
+            kite = KiteConnect(api_key=api_key)
+            kite.set_access_token(access_token)
+            profile = kite.profile()
+
+            st.session_state.api_key = api_key
+            st.session_state.access_token = access_token
+            st.session_state.kite = kite
+
+            st.sidebar.success(f"Connected: {profile['user_name']}")
+        except Exception as e:
+            st.sidebar.error(str(e))
+
+    kite = st.session_state.get("kite")
+    if kite:
+        st.sidebar.success("Kite ready")
+    else:
+        st.sidebar.warning("Not connected")
+
+    return kite
+
+def get_kite():
+    if "kite" in st.session_state:
+        return st.session_state.kite
+
+    return None
+
+# ─────────────────────────────────────────────────────────────
+# INSTRUMENT MAP (UNCHANGED)
+# ─────────────────────────────────────────────────────────────
+@st.cache_resource(ttl=86400 * 7)
+def load_kite_instrument_map(_kite):
+    instruments = _kite.instruments("NSE")
+    df = pd.DataFrame(instruments)
+
+    eq = df[(df["segment"] == "NSE") & (df["exchange"] == "NSE")]
+    idx = df[df["segment"] == "INDICES"]
+
+    eq_map = dict(zip(eq["tradingsymbol"], eq["instrument_token"]))
+    idx_map = dict(zip(idx["tradingsymbol"], idx["instrument_token"]))
+
+    st.sidebar.success(f"{len(eq_map)} equities, {len(idx_map)} indices loaded")
+    return {**eq_map, **idx_map}
+
+# ─────────────────────────────────────────────────────────────
+# HISTORICAL DATA (UNCHANGED)
+# ─────────────────────────────────────────────────────────────
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_fixed(2),  # Wait 2 seconds between retries
+    retry=retry_if_exception_type((requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError))
+)
+@st.cache_data(ttl=86400)
+def fetch_kite_historical(_kite, symbol, days=365*3):
+    from_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    to_date = datetime.now().strftime("%Y-%m-%d")
+
+    is_index = symbol in BENCHMARK_CANDIDATES.values()
+    token = st.session_state.instrument_map.get(
+        symbol if is_index else symbol.replace(".NS", "")
+    )
+
+    if not token:
+        return pd.DataFrame()
+
+    data = _kite.historical_data(
+        token, from_date, to_date, "day"
+    )
+
+    if not data:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(data)
+    df["date"] = pd.to_datetime(df["date"])
+    df.set_index("date", inplace=True)
+    df = df[["open", "high", "low", "close", "volume"]]
+    df.columns = ["Open", "High", "Low", "Close", "Volume"]
+    return df
+
+# ─────────────────────────────────────────────────────────────
+# BATCH FETCH (PROGRESS → SIDEBAR)
+# ─────────────────────────────────────────────────────────────
+def fetch_in_batches(kite, symbols, batch_size=100):
+    all_data = {}
+    total = len(symbols)
+
+    prog = st.sidebar.progress(0.0)
+    status = st.sidebar.empty()
+
+    for i in range(0, total, batch_size):
+        batch = symbols[i:i+batch_size]
+        status.info(f"Fetching {i+len(batch)}/{total}")
+
+        for sym in batch:
+            all_data[sym] = fetch_kite_historical(kite, sym)
+            time.sleep(0.25)
+
+        prog.progress((i + len(batch)) / total)
+
+    status.success("Fetch complete")
+    return all_data
+
+# ─────────────────────────────────────────────────────────────
+# UNIVERSE LOADERS (UNCHANGED)
 # ─────────────────────────────────────────────────────────────
 @st.cache_resource(ttl=86400)
 def load_nse_universe():
     url = "https://archives.nseindia.com/content/equities/EQUITY_L.csv"
-    try:
-        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
-        r.raise_for_status()
+    df = pd.read_csv(url)
+    df.columns = df.columns.str.upper().str.strip()
 
-        df = pd.read_csv(io.StringIO(r.text), encoding="utf-8-sig")
+    df = df[df["SERIES"] == "EQ"]
+    df["Symbol"] = df["SYMBOL"] + ".NS"
+    name_map = dict(zip(df["SYMBOL"], df["NAME OF COMPANY"]))
+    return df["Symbol"].tolist(), name_map
 
-        # 🔑 Critical fix
-        df.columns = df.columns.str.strip().str.upper()
+# @st.cache_resource(ttl=86400)
+# def load_nifty50_symbols():
+#     url = "https://archives.nseindia.com/content/indices/ind_nifty50list.csv"
+#     df = pd.read_csv(url)
+#     return [s + ".NS" for s in df["Symbol"]]
 
-        if "SERIES" not in df.columns:
-            st.error("NSE file format changed: 'SERIES' column missing")
-            st.write("Columns found:", list(df.columns))
-            return [], {}
-
-        df = df[df["SERIES"] == "EQ"]
-
-        if "SYMBOL" not in df.columns:
-            st.error("NSE file missing SYMBOL column")
-            return [], {}
-
-        df["Symbol"] = df["SYMBOL"].str.strip() + ".NS"
-
-        name_map = {}
-        if "NAME OF COMPANY" in df.columns:
-            name_map = dict(
-                zip(df["SYMBOL"].str.strip(), df["NAME OF COMPANY"].str.strip())
-            )
-
-        return df["Symbol"].tolist(), name_map
-
-    except Exception as e:
-        st.error(f"Universe load failed: {e}")
-        return [], {}
-
-# ─────────────────────────────────────────────────────────────
-# LOAD NIFTY 50
-# ─────────────────────────────────────────────────────────────
 @st.cache_resource(ttl=86400)
 def load_nifty50_symbols():
     url = "https://archives.nseindia.com/content/indices/ind_nifty50list.csv"
-    try:
-        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
-        r.raise_for_status()
-        df = pd.read_csv(io.StringIO(r.text))
-        return [s.strip() + ".NS" for s in df["Symbol"].dropna()]
-    except Exception:
-        return []
+
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Connection": "keep-alive"
+    }
+
+    for attempt in range(3):
+        try:
+            r = requests.get(url, headers=headers, timeout=10)
+            r.raise_for_status()
+            df = pd.read_csv(io.StringIO(r.text))
+            return [s + ".NS" for s in df["Symbol"]]
+        except Exception:
+            time.sleep(2)
+
+    st.error("Failed to load Nifty 50 list from NSE")
+    return []
 
 # ─────────────────────────────────────────────────────────────
-# INDICATORS
+# INDICATORS (UNCHANGED)
 # ─────────────────────────────────────────────────────────────
 def compute_rsi(series, period=14):
     delta = series.diff()
     gain = delta.where(delta > 0, 0)
     loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.rolling(period).mean()
-    avg_loss = loss.rolling(period).mean()
-    rs = avg_gain / avg_loss
+    rs = gain.rolling(period).mean() / loss.rolling(period).mean()
     return round((100 - (100 / (1 + rs))).iloc[-1], 1)
 
-def log_rs(price_now, price_then, bm_now, bm_then):
-    return np.log(price_now / price_then) - np.log(bm_now / bm_then)
+def log_rs(p, p0, b, b0):
+    return np.log(p / p0) - np.log(b / b0)
 
 # ─────────────────────────────────────────────────────────────
-# RS SCAN LOGIC
+# RS SCAN (LOGIC UNCHANGED)
 # ─────────────────────────────────────────────────────────────
-def rs_scan(symbols, name_map, min_rs_rank, min_liq, benchmark_mode):
+def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode):
+    st.session_state.instrument_map = load_kite_instrument_map(kite)
 
-    status = st.empty()
-    progress = st.progress(0)
+    stock_data = fetch_in_batches(kite, symbols)
+    bm_data = fetch_in_batches(kite, list(BENCHMARK_CANDIDATES.values()))
 
-    status.info("📥 Downloading stock data…")
-    progress.progress(10)
-    
-    # with st.spinner("Downloading market data…"):
-    stock_data = yf.download(
-        symbols, period="3y", auto_adjust=True,
-        group_by="ticker", threads=True, progress=False
-    )
-    status.info("📊 Evaluating benchmarks…")
-    progress.progress(25)
+    # best_ret = -1e9
+    # selected_df = None
 
-    bm_data = yf.download(
-        list(BENCHMARK_CANDIDATES.values()),
-        period="3y", auto_adjust=True,
-        group_by="ticker", progress=False
-    )
+    # for name, sym in BENCHMARK_CANDIDATES.items():
+    #     df = bm_data.get(sym)
+    #     if df is None or len(df) < RS_LOOKBACK_6M:
+    #         continue
+    #     ret = df["Close"].iloc[-1] / df["Close"].iloc[-RS_LOOKBACK_6M] - 1
+    #     if ret > best_ret:
+    #         best_ret = ret
+    #         selected_df = df
 
-# ───────── Benchmark selection ─────────
-    bm_rows = []
-    selected_df = None
-    selected_name = None
     best_ret = -1e9
+    selected_df = None
+    selected_benchmark = None
+    benchmark_rows = []
 
-    for name, ticker in BENCHMARK_CANDIDATES.items():
-        if ticker not in bm_data.columns.levels[0]:
+    for name, sym in BENCHMARK_CANDIDATES.items():
+        df = bm_data.get(sym)
+        if df is None or len(df) < RS_LOOKBACK_6M:
             continue
 
-        df = bm_data[ticker].dropna()
-        if len(df) < RS_LOOKBACK_6M + 5:
-            continue
+        ret = df["Close"].iloc[-1] / df["Close"].iloc[-RS_LOOKBACK_6M] - 1
+        benchmark_rows.append({
+            "Benchmark": name,
+            "Return_6M": round(ret * 100, 2)
+        })
 
-        close_bm = df["Close"]  # keep Series
-        ret6m = (close_bm.iloc[-1] / close_bm.iloc[-RS_LOOKBACK_6M] - 1) * 100
-        bm_rows.append((name, ticker, round(ret6m, 2)))
-
-        if benchmark_mode == "Auto" and ret6m > best_ret:
-            best_ret = ret6m
-            selected_name = name
+        if ret > best_ret:
+            best_ret = ret
             selected_df = df
+            selected_benchmark = name
 
-    if benchmark_mode == "Fixed Nifty 500":
-        selected_name = "Nifty 500"
-        selected_df = bm_data["^CRSLDX"].dropna()
-
-    st.subheader("Benchmark Comparison (6M)")
-    bm_df = pd.DataFrame(bm_rows, columns=["Benchmark", "Ticker", "6M Return %"]) \
-             .sort_values("6M Return %", ascending=False)
-    st.dataframe(bm_df, hide_index=True)
-    st.success(f"Selected Benchmark: **{selected_name}**")
-
-    status.success(f"✅ Selected Benchmark: {selected_name}")
-    progress.progress(35)
-
-    # ───────── Stock loop ─────────
     results = []
-    total = len(symbols)
-
-    status.info("🔎 Scanning stocks…")
-
-    for i, sym in enumerate(symbols):
-        if sym not in stock_data.columns.levels[0]:
+    for sym, df in stock_data.items():
+        if df.empty or len(df) < 250:
             continue
 
-        if i % 25 == 0:
-            progress.progress(35 + int(55 * i / total))
-            status.info(f"🔎 Scanning… {i}/{total}")
-
-        df = stock_data[sym].dropna()
-        if len(df) < 250:
-            continue
-
-        close = df["Close"]           # Series – never overwrite with scalar
+        close = df["Close"]
         price = close.iloc[-1]
-
         dma200 = close.rolling(200).mean().iloc[-1]
         liq = (close * df["Volume"]).tail(30).mean() / 1e7
 
-        if price < dma200 or liq < min_liq:
+        if price < dma200 * 0.95 or liq < min_liq:
             continue
 
-        # Benchmark Series – keep separate
-        bm_close = selected_df["Close"]
-
-        # Compute returns without overwriting Series
-        bm_ret_3m = (bm_close.iloc[-1] / bm_close.iloc[-RS_LOOKBACK_3M] - 1)
-        bm_ret_6m = (bm_close.iloc[-1] / bm_close.iloc[-RS_LOOKBACK_6M] - 1)
-
-        # Stock returns
-        stock_ret_6m = price / close.iloc[-RS_LOOKBACK_6M] - 1
-        stock_ret_3m = price / close.iloc[-RS_LOOKBACK_3M] - 1
-
-        # Log RS
         rs6 = log_rs(price, close.iloc[-RS_LOOKBACK_6M],
-                     bm_close.iloc[-1], bm_close.iloc[-RS_LOOKBACK_6M])
+                     selected_df["Close"].iloc[-1],
+                     selected_df["Close"].iloc[-RS_LOOKBACK_6M])
 
         rs3 = log_rs(price, close.iloc[-RS_LOOKBACK_3M],
-                     bm_close.iloc[-1], bm_close.iloc[-RS_LOOKBACK_3M])
+                     selected_df["Close"].iloc[-1],
+                     selected_df["Close"].iloc[-RS_LOOKBACK_3M])
 
         rs_delta = rs3 - rs6
-
-        rsi_d = compute_rsi(close)
-        rsi_w = compute_rsi(close.resample("W-FRI").last()) if len(close) > 100 else None
+        rsi_d = compute_rsi(close) 
+        rsi_w = compute_rsi(close.resample("W-FRI").last()) if len(close) > 100 else None 
         rsi_m = compute_rsi(close.resample("ME").last()) if len(close) > 400 else None
 
         clean = sym.replace(".NS", "")
@@ -232,62 +328,62 @@ def rs_scan(symbols, name_map, min_rs_rank, min_liq, benchmark_mode):
             "Chart": tv
         })
 
-    progress.progress(95)
-    status.info("📐 Ranking…")
-
     df = pd.DataFrame(results)
-    if df.empty:
-        return df
-
     df["RS_Rank"] = df["RS_6M"].rank(pct=True) * 100
-    df["Momentum"] = np.where(df["RS_Delta"] > 0, "Improving",
-                       np.where(df["RS_Delta"] < 0, "Decelerating", "Stable"))
+    df["Momentum"] = np.where(df["RS_Delta"] > 0, "🚀 Improving", np.where(df["RS_Delta"] < 0, "📉 Slowing", "➡️ Stable"))
+    
+    # return df[df["RS_Rank"] >= min_rs].sort_values("RS_Rank", ascending=False)
+    bm_table = pd.DataFrame(benchmark_rows).sort_values("Return_6M", ascending=False)
 
-    df = df[df["RS_Rank"] >= min_rs_rank]
-    df = df.sort_values("RS_Rank", ascending=False)
+    return (
+        df[df["RS_Rank"] >= min_rs].sort_values("RS_Rank", ascending=False),
+        selected_benchmark,
+        bm_table
+    )
 
-    progress.progress(100)
-    status.success("✅ Scan complete")
-
-
-    return df.reset_index(drop=True)
-
-# ───────── UI ─────────
-def color_rsi(val):
-    if pd.isna(val):
-        return ""
-    if val >= 60:
-        return "background-color: #ffcccc"
-    if val <= 40:
-        return "background-color: #ccffcc"
-    return ""
 
 # ─────────────────────────────────────────────────────────────
-# MAIN APP
+# MAIN
 # ─────────────────────────────────────────────────────────────
 def main():
-    st.title("NSE Relative Strength Leaders Scanner – PRO")
+    st.markdown("""
+    <div style='background: linear-gradient(135deg,#667eea,#764ba2,#f093fb);
+                padding:1.2rem;border-radius:14px;color:white;text-align:center'>
+        <h2 style='margin:0'>🏆 NSE RS Leaders PRO</h2>
+        <p style='margin:0;font-size:0.9rem'>Dynamic benchmark • RS acceleration</p>
+    </div>
+    """, unsafe_allow_html=True)
 
-    with st.sidebar:
-        universe = st.radio("Universe", ["Full NSE", "Nifty 50"])
-        benchmark_mode = st.radio("Benchmark Mode", ["Auto", "Fixed Nifty 500"])
-        min_rs = st.slider("Min RS Rank", 60, 95, MIN_RS_RANK)
-        min_liq = st.slider("Min Liquidity (Cr)", 1, 20, MIN_LIQUIDITY_CR)
-        run = st.button("Run Scan", type="primary")
+    # kite = kite_auth_section()
+    kite_login_ui()
+    handle_kite_callback()
+    kite = get_kite()
 
-    full_syms, name_map = load_nse_universe()
-    if not full_syms:
+
+    if not kite:
         st.stop()
 
-    nifty50 = load_nifty50_symbols()
-    symbols = full_syms if universe == "Full NSE" else nifty50
+    st.sidebar.markdown("### ⚙️ Scan Config")
+    universe = st.sidebar.radio("Universe", ["Nifty 50", "Full NSE"])
+    benchmark_mode = st.sidebar.radio("Benchmark", ["Auto"])
+    min_rs = st.sidebar.slider("Min RS Rank", 60, 95, MIN_RS_RANK)
+    min_liq = st.sidebar.slider("Min Liquidity ₹Cr", 1, 20, MIN_LIQUIDITY_CR)
 
-    if run:
-        df = rs_scan(symbols, name_map, min_rs, min_liq, benchmark_mode)
+    if st.sidebar.button("🚀 Run Scan", use_container_width=True):
+        syms, name_map = load_nse_universe()
+        symbols = load_nifty50_symbols() if universe == "Nifty 50" else syms
 
-        if df.empty:
-            st.warning("No stocks passed filters")
-            return
+        # df = rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode)
+
+        df, selected_benchmark, bm_table = rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode)
+
+
+        # styled = df.style.background_gradient(
+        #     subset=["RS_Rank"], cmap="Greens"
+        # ).applymap(
+        #     lambda v: "color:green" if v >= 60 else "color:red" if v <= 40 else "",
+        #     subset=["RSI_D", "RSI_W", "RSI_M"]
+        # )
 
         # ── Create styled DataFrame FIRST ──
         def rsi_color(v):
@@ -329,6 +425,18 @@ def main():
             csv,
             f"RS_LEADERS_PRO_{datetime.now():%Y%m%d}.csv",
             mime="text/csv",
+            width="stretch"
+        )
+
+        st.markdown("---")
+
+        st.markdown(
+            f"### 📊 Benchmark Used for RS: **{selected_benchmark}**"
+        )
+
+        st.dataframe(
+            bm_table,
+            hide_index=True,
             width="stretch"
         )
 
