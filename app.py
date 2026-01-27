@@ -53,24 +53,19 @@ def kite_login_ui():
 def handle_kite_callback():
     if "kite" in st.session_state:
         return
-
     params = st.query_params
     request_token = params.get("request_token")
+    if request_token and request_token != "None":  # Handle empty strings
+        try:
+            kite = KiteConnect(api_key=st.secrets["KITE_API_KEY"])
+            data = kite.generate_session(request_token, st.secrets["KITE_API_SECRET"])
+            kite.set_access_token(data["access_token"])
+            st.session_state.kite = kite
+            st.session_state.access_token = data["access_token"]
+        except Exception as e:
+            st.error(f"Auth failed: {e}")
+    st.query_params.clear()  # Always clear to prevent param loops
 
-    if request_token:
-        kite = KiteConnect(api_key=st.secrets["KITE_API_KEY"])
-        data = kite.generate_session(
-            request_token,
-            st.secrets["KITE_API_SECRET"]
-        )
-        kite.set_access_token(data["access_token"])
-
-        st.session_state.kite = kite
-        st.session_state.access_token = data["access_token"]
-
-        # 🚨 THIS PREVENTS REDIRECT LOOP
-        st.query_params.clear()
-        st.rerun()
 
 # ─────────────────────────────────────────────────────────────
 # KITE AUTH
@@ -369,7 +364,7 @@ def main():
     kite = st.session_state.get("kite")
     if not kite:
         st.stop()
-        
+
     st.sidebar.markdown("### ⚙️ Scan Config")
     universe = st.sidebar.radio("Universe", ["Nifty 50", "Full NSE"])
     benchmark_mode = st.sidebar.radio("Benchmark", ["Auto"])
