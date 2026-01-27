@@ -336,13 +336,27 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode):
         bm_table
     )
 
-def consume_kite_token_once():
+def consume_code_once():
     params = st.experimental_get_query_params()
 
-    if "access_token" in params and "kite" not in st.session_state:
-        kite = KiteConnect(api_key=st.secrets["KITE_API_KEY"])
-        kite.set_access_token(params["access_token"][0])
-        st.session_state.kite = kite
+    if "code" not in params or "kite" in st.session_state:
+        return
+
+    code = params["code"][0]
+
+    # Fetch token from callback app
+    import requests
+    resp = requests.get(
+        f"https://kc-rs-scanner.streamlit.app/get_token?code={code}",
+        timeout=5
+    )
+
+    access_token = resp.text.strip()
+
+    kite = KiteConnect(api_key=st.secrets["KITE_API_KEY"])
+    kite.set_access_token(access_token)
+    st.session_state.kite = kite
+
 
 
 # ─────────────────────────────────────────────────────────────
