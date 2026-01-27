@@ -336,7 +336,7 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode):
         bm_table
     )
 
-def consume_code_once():
+def consume_kite_token_once():
     params = st.experimental_get_query_params()
 
     if "code" not in params or "kite" in st.session_state:
