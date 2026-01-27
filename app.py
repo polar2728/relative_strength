@@ -33,26 +33,32 @@ BENCHMARK_CANDIDATES = {
 
 
 def kite_login_ui():
-    api_key = st.secrets["KITE_API_KEY"]
-    redirect_url = st.secrets["REDIRECT_URL"]
+    if "kite" in st.session_state:
+        return
 
     login_url = (
-        f"https://kite.zerodha.com/connect/login?"
-        f"api_key={api_key}&v=3&redirect_uri={urllib.parse.quote(redirect_url)}"
+        "https://kite.zerodha.com/connect/login"
+        f"?api_key={st.secrets['KITE_API_KEY']}"
+        f"&v=3&redirect_uri=https://rs-scanner.streamlit.app/"  # Your exact app URL
     )
 
-    # if "access_token" not in st.session_state:
-    #     st.sidebar.markdown("### 🔐 Login to Zerodha")
-    #     st.sidebar.markdown(
-    #         f"<a href='{login_url}' target='_self'>🔑 Login with Kite</a>",
-    #         unsafe_allow_html=True
-    #     )
-    #     st.stop()
-
+    st.sidebar.markdown("### 🔐 Zerodha Login")
     st.sidebar.markdown(
-        f"<a href='{login_url}' target='_blank'>🔑 Login with Kite</a>",
+        f"""
+        <div style='padding: 1rem; background: #f8f9fa; border-radius: 8px; border-left: 4px solid #10b981;'>
+            <a href='{login_url}' target='_blank' 
+               style='color: #10b981; text-decoration: none; font-weight: 600; font-size: 16px;'>
+                🔑 Login with Kite (New Tab)
+            </a>
+            <p style='margin: 8px 0 0 0; font-size: 12px; color: #6b7280;'>
+                After login, return to this tab
+            </p>
+        </div>
+        """,
         unsafe_allow_html=True
     )
+    st.stop()
+
 
 def handle_kite_callback():
     if "kite" in st.session_state:
@@ -361,10 +367,10 @@ def main():
     """, unsafe_allow_html=True)
 
     # kite = kite_auth_section()
-    kite_login_ui()
-    handle_kite_callback()
-    kite = get_kite()
-
+    handle_kite_callback()  # 1️⃣ Check for callback first
+    kite_login_ui()         # 2️⃣ Show login if no kite session
+    
+    kite = st.session_state.get("kite")
 
     if not kite:
         st.stop()
