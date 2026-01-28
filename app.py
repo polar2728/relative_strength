@@ -126,33 +126,55 @@ def load_kite_instrument_map(_kite):
     wait=wait_fixed(2),  # Wait 2 seconds between retries
     retry=retry_if_exception_type((requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError))
 )
-@st.cache_data(ttl=86400)
+@st.cache_data(ttl=86400)  # keep cache, but add safety
 def fetch_kite_historical(_kite, symbol, days=365*3):
     from_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-    to_date = datetime.now().strftime("%Y-%m-%d")
+    to_date   = datetime.now().strftime("%Y-%m-%d")
 
     is_index = symbol in BENCHMARK_CANDIDATES.values()
-    token = st.session_state.instrument_map.get(
-        symbol if is_index else symbol.replace(".NS", "")
-    )
+    key = symbol if is_index else symbol.replace(".NS", "")
 
-    if not token:
+    token = st.session_state.instrument_map.get(key)
+
+    if token is None:
+        # Very useful for debugging — will show in Streamlit logs
+        print(f"→ Skipping {symbol} | No instrument_token found for key '{key}'")
         return pd.DataFrame()
 
-    data = _kite.historical_data(
-        token, from_date, to_date, "day"
-    )
-
-    if not data:
+    try:
+        token = int(token)  # force int — fails loudly if not convertible
+    except (ValueError, TypeError):
+        print(f"→ Invalid token type for {symbol}: {token} (type={type(token)})")
         return pd.DataFrame()
 
-    df = pd.DataFrame(data)
-    df["date"] = pd.to_datetime(df["date"])
-    df.set_index("date", inplace=True)
-    df = df[["open", "high", "low", "close", "volume"]]
-    df.columns = ["Open", "High", "Low", "Close", "Volume"]
-    return df
+    print(f"→ Fetching {symbol} | token={token} | {from_date} → {to_date}")
 
+    try:
+        data = _kite.historical_data(
+            instrument_token=token,
+            from_date=from_date,
+            to_date=to_date,
+            interval="day",
+            continuous=False,
+            oi=False
+        )
+
+        if not data:
+            print(f"→ No data returned for {symbol} (token {token})")
+            return pd.DataFrame()
+
+        df = pd.DataFrame(data)
+        df["date"] = pd.to_datetime(df["date"])
+        df.set_index("date", inplace=True)
+        df = df[["open", "high", "low", "close", "volume"]]
+        df.columns = ["Open", "High", "Low", "Close", "Volume"]
+        print(f"← {symbol}: {len(df)} rows")
+        return df
+
+    except Exception as e:
+        # This will show REAL error in logs (before Streamlit redacts)
+        print(f"!!! FAILED {symbol} (token {token}): {type(e).__name__} → {str(e)}")
+        return pd.DataFrame()
 # ─────────────────────────────────────────────────────────────
 # BATCH FETCH (PROGRESS → SIDEBAR)
 # ─────────────────────────────────────────────────────────────
