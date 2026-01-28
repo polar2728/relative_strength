@@ -281,7 +281,7 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode):
 
     for name, sym in BENCHMARK_CANDIDATES.items():
         df = bm_data.get(sym)
-        min_required_days = max(RS_LOOKBACK_6M, 200) + 30  # ensure DMA200 is possible
+        min_required_days = RS_LOOKBACK_6M + 20
         if df.empty or len(df) < min_required_days:
             continue
 
@@ -354,7 +354,7 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode):
         print("DEBUG: Approximate skip reasons:", reasons)
     else:
         print("DEBUG: Sample columns in first result:", list(results[0].keys()))
-        
+
     df = pd.DataFrame(results)
     df["RS_Rank"] = df["RS_6M"].rank(pct=True) * 100
     df["Momentum"] = np.where(df["RS_Delta"] > 0, "🚀 Improving", np.where(df["RS_Delta"] < 0, "📉 Slowing", "➡️ Stable"))
