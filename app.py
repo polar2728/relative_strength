@@ -156,7 +156,7 @@ def fetch_kite_historical(_kite, symbol, days=365*3):
 # ─────────────────────────────────────────────────────────────
 # BATCH FETCH (PROGRESS → SIDEBAR)
 # ─────────────────────────────────────────────────────────────
-def fetch_in_batches(kite, symbols, batch_size=100):
+def fetch_in_batches(kite, symbols, batch_size=50):
     all_data = {}
     total = len(symbols)
 
@@ -169,7 +169,7 @@ def fetch_in_batches(kite, symbols, batch_size=100):
 
         for sym in batch:
             all_data[sym] = fetch_kite_historical(kite, sym)
-            time.sleep(0.25)
+            time.sleep(0.35)
 
         prog.progress((i + len(batch)) / total)
 
