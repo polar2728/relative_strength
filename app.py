@@ -340,6 +340,21 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode):
             "Chart": tv
         })
 
+    print(f"DEBUG: Fetched {len(stock_data)} symbols total")
+    print(f"DEBUG: Stocks that survived filters: {len(results)}")
+
+    if len(results) == 0:
+        print("DEBUG: All symbols filtered out — likely length or DMA200/liquidity filter")
+        # Quick counter for why (approximate)
+        reasons = {"short_history": 0, "below_dma200": 0, "low_liquidity": 0}
+        for sym, df in stock_data.items():
+            if df.empty or len(df) < min_required_days:
+                reasons["short_history"] += 1
+            # Add more if you want...
+        print("DEBUG: Approximate skip reasons:", reasons)
+    else:
+        print("DEBUG: Sample columns in first result:", list(results[0].keys()))
+        
     df = pd.DataFrame(results)
     df["RS_Rank"] = df["RS_6M"].rank(pct=True) * 100
     df["Momentum"] = np.where(df["RS_Delta"] > 0, "🚀 Improving", np.where(df["RS_Delta"] < 0, "📉 Slowing", "➡️ Stable"))
