@@ -127,7 +127,7 @@ def load_kite_instrument_map(_kite):
     retry=retry_if_exception_type((requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError))
 )
 @st.cache_data(ttl=86400)  # keep cache, but add safety
-def fetch_kite_historical(_kite, symbol, days=365):  # ← set to 365
+def fetch_kite_historical(_kite, symbol, days=365*3):  # ← set to 365
     from_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
     to_date   = datetime.now().strftime("%Y-%m-%d")
 
