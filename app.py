@@ -194,7 +194,7 @@ def fetch_in_batches(kite, symbols, batch_size=50):
         for sym in batch:
             all_data[sym] = fetch_kite_historical(kite, sym)
             processed += 1
-            time.sleep(0.35)
+            time.sleep(0.25)
 
             # Force UI refresh every ~10–15 seconds
             now = time.time()
