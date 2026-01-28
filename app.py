@@ -127,7 +127,7 @@ def load_kite_instrument_map(_kite):
     retry=retry_if_exception_type((requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError))
 )
 @st.cache_data(ttl=86400)  # keep cache, but add safety
-def fetch_kite_historical(_kite, symbol, days=365*3):  # ← set to 365
+def fetch_kite_historical(_kite, symbol, days=365):  # ← set to 365
     from_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
     to_date   = datetime.now().strftime("%Y-%m-%d")
 
@@ -281,7 +281,7 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode):
 
     for name, sym in BENCHMARK_CANDIDATES.items():
         df = bm_data.get(sym)
-        min_required_days = RS_LOOKBACK_6M + 50  # ~176 — or bump to 200+ for strict DMA200
+        min_required_days = max(RS_LOOKBACK_6M, 200) + 30  # ensure DMA200 is possible
         if df.empty or len(df) < min_required_days:
             continue
 
