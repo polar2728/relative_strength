@@ -127,7 +127,7 @@ def load_kite_instrument_map(_kite):
     retry=retry_if_exception_type((requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError))
 )
 @st.cache_data(ttl=86400)  # keep cache, but add safety
-def fetch_kite_historical(_kite, symbol, days=180):
+def fetch_kite_historical(_kite, symbol, days=365):  # ← set to 365
     from_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
     to_date   = datetime.now().strftime("%Y-%m-%d")
 
@@ -194,7 +194,7 @@ def fetch_in_batches(kite, symbols, batch_size=50):
         for sym in batch:
             all_data[sym] = fetch_kite_historical(kite, sym)
             processed += 1
-            time.sleep(0.25)
+            time.sleep(0.34)
 
             # Force UI refresh every ~10–15 seconds
             now = time.time()
@@ -274,18 +274,6 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode):
     stock_data = fetch_in_batches(kite, symbols)
     bm_data = fetch_in_batches(kite, list(BENCHMARK_CANDIDATES.values()))
 
-    # best_ret = -1e9
-    # selected_df = None
-
-    # for name, sym in BENCHMARK_CANDIDATES.items():
-    #     df = bm_data.get(sym)
-    #     if df is None or len(df) < RS_LOOKBACK_6M:
-    #         continue
-    #     ret = df["Close"].iloc[-1] / df["Close"].iloc[-RS_LOOKBACK_6M] - 1
-    #     if ret > best_ret:
-    #         best_ret = ret
-    #         selected_df = df
-
     best_ret = -1e9
     selected_df = None
     selected_benchmark = None
@@ -293,7 +281,8 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode):
 
     for name, sym in BENCHMARK_CANDIDATES.items():
         df = bm_data.get(sym)
-        if df is None or len(df) < RS_LOOKBACK_6M:
+        min_required_days = RS_LOOKBACK_6M + 50  # ~176 — or bump to 200+ for strict DMA200
+        if df.empty or len(df) < min_required_days:
             continue
 
         ret = df["Close"].iloc[-1] / df["Close"].iloc[-RS_LOOKBACK_6M] - 1
