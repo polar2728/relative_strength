@@ -127,7 +127,7 @@ def load_kite_instrument_map(_kite):
     retry=retry_if_exception_type((requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError))
 )
 @st.cache_data(ttl=86400)  # keep cache, but add safety
-def fetch_kite_historical(_kite, symbol, days=365*3):
+def fetch_kite_historical(_kite, symbol, days=180):
     from_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
     to_date   = datetime.now().strftime("%Y-%m-%d")
 
@@ -181,19 +181,30 @@ def fetch_kite_historical(_kite, symbol, days=365*3):
 def fetch_in_batches(kite, symbols, batch_size=50):
     all_data = {}
     total = len(symbols)
-
     prog = st.sidebar.progress(0.0)
     status = st.sidebar.empty()
 
+    processed = 0
+    last_update = time.time()
+
     for i in range(0, total, batch_size):
         batch = symbols[i:i+batch_size]
-        status.info(f"Fetching {i+len(batch)}/{total}")
+        status.info(f"Fetching batch {i//batch_size + 1} ({processed}/{total} done)")
 
         for sym in batch:
             all_data[sym] = fetch_kite_historical(kite, sym)
+            processed += 1
             time.sleep(0.35)
 
-        prog.progress((i + len(batch)) / total)
+            # Force UI refresh every ~10–15 seconds
+            now = time.time()
+            if now - last_update > 12:
+                prog.progress(processed / total)
+                status.info(f"Still working... {processed}/{total} symbols fetched")
+                last_update = now
+                time.sleep(0.1)  # tiny yield
+
+        prog.progress(processed / total)
 
     status.success("Fetch complete")
     return all_data
