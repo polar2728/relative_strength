@@ -318,10 +318,17 @@ def load_nifty50_symbols():
     return []
 
 # ─────────────────────────────────────────────────────────────
-# INDICATORS - FIXED RSI_M CALCULATION
+# INDICATORS - FIXED RSI CALCULATION
 # ─────────────────────────────────────────────────────────────
 def compute_rsi(series, period=14):
     """Compute RSI with edge case handling"""
+    # Ensure series is not empty and has enough data
+    if series is None or len(series) < period + 1:
+        return None
+    
+    # Remove any NaN values
+    series = series.dropna()
+    
     if len(series) < period + 1:
         return None
     
@@ -329,17 +336,45 @@ def compute_rsi(series, period=14):
     gain = delta.where(delta > 0, 0).rolling(period).mean()
     loss = -delta.where(delta < 0, 0).rolling(period).mean()
     
-    if pd.isna(gain.iloc[-1]) or pd.isna(loss.iloc[-1]):
+    # Get the last valid value
+    gain_val = gain.iloc[-1]
+    loss_val = loss.iloc[-1]
+    
+    if pd.isna(gain_val) or pd.isna(loss_val):
         return None
-    if loss.iloc[-1] == 0:
+    if loss_val == 0:
         return 100.0
-    if gain.iloc[-1] == 0:
+    if gain_val == 0:
         return 0.0
     
-    rs = gain.iloc[-1] / loss.iloc[-1]
+    rs = gain_val / loss_val
     rsi = 100 - (100 / (1 + rs))
     
     return round(rsi, 1)
+
+def resample_to_weekly(close_series):
+    """Resample daily close to weekly close (Friday)"""
+    if close_series is None or len(close_series) < 20:
+        return None
+    
+    # Resample to weekly, taking last value of each week
+    weekly = close_series.resample('W-FRI').last()
+    # Drop NaN values
+    weekly = weekly.dropna()
+    
+    return weekly if len(weekly) >= 20 else None
+
+def resample_to_monthly(close_series):
+    """Resample daily close to monthly close (month end)"""
+    if close_series is None or len(close_series) < 60:
+        return None
+    
+    # Resample to month end, taking last value of each month
+    monthly = close_series.resample('M').last()
+    # Drop NaN values
+    monthly = monthly.dropna()
+    
+    return monthly if len(monthly) >= 15 else None
 
 def log_rs(p, p0, b, b0):
     """Log-based relative strength calculation"""
@@ -465,16 +500,16 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode):
             except Exception:
                 continue
             
-            # Calculate RSI - FIXED: Use resample('MS') for month-start instead of 'ME'
+            # Calculate RSI at multiple timeframes - FIXED
             rsi_d = compute_rsi(close)
             
             # Weekly RSI
-            weekly_close = close.resample("W-FRI").last().dropna()
-            rsi_w = compute_rsi(weekly_close) if len(weekly_close) > 20 else None
+            weekly_close = resample_to_weekly(close)
+            rsi_w = compute_rsi(weekly_close) if weekly_close is not None else None
             
-            # Monthly RSI - FIXED: resample to month-start and ensure enough data
-            monthly_close = close.resample("MS").last().dropna()
-            rsi_m = compute_rsi(monthly_close, period=14) if len(monthly_close) > 20 else None
+            # Monthly RSI
+            monthly_close = resample_to_monthly(close)
+            rsi_m = compute_rsi(monthly_close) if monthly_close is not None else None
 
             clean = sym.replace(".NS", "")
             tv = f"https://tradingview.com/chart/?symbol=NSE%3A{clean}"
