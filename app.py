@@ -167,7 +167,8 @@ def prefilter_universe(kite, symbols, instrument_map, min_liq_cr=5):
             symbol_map[key] = sym
     
     if not tokens:
-        return []
+        st.warning("⚠️ No valid instrument tokens found for symbols")
+        return symbols  # Return all symbols if quote API fails
     
     # Fetch quotes in batches of 500
     passed = []
@@ -188,7 +189,7 @@ def prefilter_universe(kite, symbols, instrument_map, min_liq_cr=5):
                     # Rough daily liquidity estimate (current price * volume)
                     daily_liq = (ltp * volume) / 1e7  # in crores
                     
-                    # Pass if >= 50% of min threshold (conservative)
+                    # Pass if >= 30% of min threshold (very conservative for pre-filter)
                     if daily_liq >= min_liq_cr * 0.3:
                         passed.append(symbol_map[instrument])
             
@@ -197,11 +198,16 @@ def prefilter_universe(kite, symbols, instrument_map, min_liq_cr=5):
                 time.sleep(0.35)
                 
         except Exception as e:
-            print(f"Quote API error for batch {batch_num}: {e}")
+            st.warning(f"Quote API error for batch {batch_num}: {e}")
             # On error, pass all symbols from this batch to be safe
             for inst in batch:
                 if inst in symbol_map:
                     passed.append(symbol_map[inst])
+    
+    # If pre-filter failed completely, return all symbols
+    if len(passed) == 0:
+        st.warning("⚠️ Pre-filter failed, processing all symbols")
+        return symbols
     
     return passed
 
@@ -226,6 +232,7 @@ def fetch_kite_historical_core(kite, symbol, days=300, instrument_map=None):
 
     if token is None:
         print(f"→ Skipping {symbol} | No instrument_token found for key '{key}'")
+        print(f"   Available index keys: {list(instrument_map['indices'].keys())[:10]}")
         return pd.DataFrame()
 
     try:
@@ -233,6 +240,8 @@ def fetch_kite_historical_core(kite, symbol, days=300, instrument_map=None):
     except (ValueError, TypeError):
         print(f"→ Invalid token type for {symbol}: {token}")
         return pd.DataFrame()
+
+    print(f"→ Fetching {symbol} | token={token} | {from_date} → {to_date}")
 
     try:
         data = kite.historical_data(
@@ -245,6 +254,7 @@ def fetch_kite_historical_core(kite, symbol, days=300, instrument_map=None):
         )
 
         if not data:
+            print(f"→ No data returned for {symbol}")
             return pd.DataFrame()
 
         df = pd.DataFrame(data)
@@ -252,6 +262,7 @@ def fetch_kite_historical_core(kite, symbol, days=300, instrument_map=None):
         df.set_index("date", inplace=True)
         df = df[["open", "high", "low", "close", "volume"]]
         df.columns = ["Open", "High", "Low", "Close", "Volume"]
+        print(f"← {symbol}: {len(df)} rows fetched")
         return df
 
     except Exception as e:
@@ -323,6 +334,27 @@ def fetch_in_batches_parallel(kite, symbols, instrument_map, max_workers=5):
     return all_data
 
 # ─────────────────────────────────────────────────────────────
+# SEQUENTIAL FETCH FOR BENCHMARKS (MORE RELIABLE)
+# ─────────────────────────────────────────────────────────────
+def fetch_benchmarks_sequential(kite, instrument_map):
+    """Fetch benchmarks sequentially with better error handling"""
+    bm_data = {}
+    
+    for name, sym in BENCHMARK_CANDIDATES.items():
+        st.sidebar.info(f"Fetching {name}...")
+        df = fetch_kite_historical(kite, sym, days=300, instrument_map=instrument_map)
+        
+        if not df.empty:
+            bm_data[sym] = df
+            st.sidebar.success(f"✓ {name}: {len(df)} days")
+        else:
+            st.sidebar.warning(f"✗ {name}: Failed")
+        
+        time.sleep(0.35)  # Rate limit
+    
+    return bm_data
+
+# ─────────────────────────────────────────────────────────────
 # UNIVERSE LOADERS
 # ─────────────────────────────────────────────────────────────
 @st.cache_resource(ttl=86400)
@@ -366,11 +398,16 @@ def load_nifty50_symbols():
 # ─────────────────────────────────────────────────────────────
 def compute_rsi(series, period=14):
     """Compute RSI with edge case handling"""
+    if len(series) < period + 1:
+        return None
+    
     delta = series.diff()
     gain = delta.where(delta > 0, 0).rolling(period).mean()
     loss = -delta.where(delta < 0, 0).rolling(period).mean()
     
     # Handle edge cases
+    if pd.isna(gain.iloc[-1]) or pd.isna(loss.iloc[-1]):
+        return None
     if loss.iloc[-1] == 0:
         return 100.0
     if gain.iloc[-1] == 0:
@@ -395,24 +432,31 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode):
     instrument_map = load_kite_instrument_map(kite)
     st.session_state.instrument_map = instrument_map
     
+    # Debug: Show available index symbols
+    st.sidebar.info("🔍 Checking index availability...")
+    available_indices = list(instrument_map["indices"].keys())
+    st.sidebar.text(f"Found {len(available_indices)} indices")
+    
+    # Fetch benchmark data FIRST (more reliable sequentially)
+    with st.spinner("📊 Fetching benchmark indices..."):
+        bm_data = fetch_benchmarks_sequential(kite, instrument_map)
+    
+    if not bm_data:
+        st.error("❌ Failed to fetch any benchmark data. Check your connection and token.")
+        st.stop()
+    
+    st.success(f"✅ Fetched {len(bm_data)} benchmarks successfully")
+    
     # PRE-FILTER: Use quote API to eliminate low-liquidity stocks
     with st.spinner("🔍 Pre-filtering universe with Quote API..."):
         filtered_symbols = prefilter_universe(kite, symbols, instrument_map, min_liq)
     
-    reduction_pct = (1 - len(filtered_symbols) / len(symbols)) * 100
+    reduction_pct = (1 - len(filtered_symbols) / len(symbols)) * 100 if len(symbols) > 0 else 0
     st.info(f"📊 Pre-filter: {len(symbols)} → {len(filtered_symbols)} stocks ({reduction_pct:.1f}% reduction)")
     
     if len(filtered_symbols) == 0:
         st.error("❌ No stocks passed pre-filtering. Try relaxing liquidity criteria.")
         return pd.DataFrame(), None, pd.DataFrame()
-    
-    # Fetch benchmark data (small set, can be sequential)
-    with st.spinner("📊 Fetching benchmark indices..."):
-        bm_data = {}
-        for idx, (name, sym) in enumerate(BENCHMARK_CANDIDATES.items()):
-            bm_data[sym] = fetch_kite_historical(kite, sym, days=300, instrument_map=instrument_map)
-            if idx < len(BENCHMARK_CANDIDATES) - 1:
-                time.sleep(0.34)  # Rate limit between benchmarks
 
     # PARALLEL FETCH: Stock data
     with st.spinner(f"📥 Fetching {len(filtered_symbols)} stocks in parallel..."):
@@ -432,13 +476,19 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode):
 
     for name, sym in BENCHMARK_CANDIDATES.items():
         df = bm_data.get(sym)
-        if df is None or df.empty or len(df) < min_required_days:
+        if df is None or df.empty:
+            st.sidebar.warning(f"Skipping {name} - no data")
+            continue
+        
+        if len(df) < min_required_days:
+            st.sidebar.warning(f"Skipping {name} - only {len(df)} days (need {min_required_days})")
             continue
 
         ret = df["Close"].iloc[-1] / df["Close"].iloc[-RS_LOOKBACK_6M] - 1
         benchmark_rows.append({
             "Benchmark": name,
             "Return_6M": round(ret * 100, 2),
+            "Days": len(df),
             "Status": "✅ Selected" if ret > best_ret else ""
         })
 
@@ -450,7 +500,11 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode):
     # Validate benchmark
     if selected_df is None or selected_df.empty:
         st.error("❌ No valid benchmark found with sufficient history.")
+        if benchmark_rows:
+            st.dataframe(pd.DataFrame(benchmark_rows))
         return pd.DataFrame(), None, pd.DataFrame()
+
+    st.success(f"📊 Selected benchmark: {selected_benchmark} ({len(selected_df)} days)")
 
     # Scan stocks
     results = []
@@ -483,15 +537,18 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode):
                 continue
 
             # Calculate RS metrics
-            rs6 = log_rs(price, close.iloc[-RS_LOOKBACK_6M],
-                         selected_df["Close"].iloc[-1],
-                         selected_df["Close"].iloc[-RS_LOOKBACK_6M])
+            try:
+                rs6 = log_rs(price, close.iloc[-RS_LOOKBACK_6M],
+                             selected_df["Close"].iloc[-1],
+                             selected_df["Close"].iloc[-RS_LOOKBACK_6M])
 
-            rs3 = log_rs(price, close.iloc[-RS_LOOKBACK_3M],
-                         selected_df["Close"].iloc[-1],
-                         selected_df["Close"].iloc[-RS_LOOKBACK_3M])
+                rs3 = log_rs(price, close.iloc[-RS_LOOKBACK_3M],
+                             selected_df["Close"].iloc[-1],
+                             selected_df["Close"].iloc[-RS_LOOKBACK_3M])
 
-            rs_delta = rs3 - rs6
+                rs_delta = rs3 - rs6
+            except:
+                continue
             
             # Calculate RSI at multiple timeframes
             rsi_d = compute_rsi(close)
@@ -606,6 +663,8 @@ def main():
         if not symbols:
             st.error("❌ Failed to load stock universe")
             st.stop()
+
+        st.info(f"📊 Loaded {len(symbols)} symbols from {universe}")
 
         # Run scan
         scan_start = time.time()
