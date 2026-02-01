@@ -212,15 +212,15 @@ def prefilter_universe(kite, symbols, instrument_map, min_liq_cr=5):
     return passed
 
 # ─────────────────────────────────────────────────────────────
-# HISTORICAL DATA - OPTIMIZED WITH SHORTER DATE RANGE
+# HISTORICAL DATA - FIXED: INCREASED TO 450 DAYS FOR SAFETY
 # ─────────────────────────────────────────────────────────────
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_fixed(2),
     retry=retry_if_exception_type((requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError))
 )
-def fetch_kite_historical_core(kite, symbol, days=300, instrument_map=None):
-    """Core fetch function - reduced to 300 days (enough for 200 DMA + lookback)"""
+def fetch_kite_historical_core(kite, symbol, days=450, instrument_map=None):
+    """Core fetch function - 450 days to ensure 250+ trading days"""
     from_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
     to_date   = datetime.now().strftime("%Y-%m-%d")
 
@@ -232,7 +232,6 @@ def fetch_kite_historical_core(kite, symbol, days=300, instrument_map=None):
 
     if token is None:
         print(f"→ Skipping {symbol} | No instrument_token found for key '{key}'")
-        print(f"   Available index keys: {list(instrument_map['indices'].keys())[:10]}")
         return pd.DataFrame()
 
     try:
@@ -273,7 +272,7 @@ def fetch_kite_historical_core(kite, symbol, days=300, instrument_map=None):
 rate_limiter = RateLimiter(max_calls=3, period=1.0)
 
 @rate_limiter
-def fetch_kite_historical(kite, symbol, days=300, instrument_map=None):
+def fetch_kite_historical(kite, symbol, days=450, instrument_map=None):
     """Rate-limited wrapper for historical data fetch"""
     return fetch_kite_historical_core(kite, symbol, days, instrument_map)
 
@@ -295,7 +294,7 @@ def fetch_in_batches_parallel(kite, symbols, instrument_map, max_workers=5):
     def fetch_symbol(sym):
         nonlocal processed, successful, last_update
         try:
-            df = fetch_kite_historical(kite, sym, days=300, instrument_map=instrument_map)
+            df = fetch_kite_historical(kite, sym, days=450, instrument_map=instrument_map)
             
             with lock:
                 all_data[sym] = df
@@ -342,7 +341,7 @@ def fetch_benchmarks_sequential(kite, instrument_map):
     
     for name, sym in BENCHMARK_CANDIDATES.items():
         st.sidebar.info(f"Fetching {name}...")
-        df = fetch_kite_historical(kite, sym, days=300, instrument_map=instrument_map)
+        df = fetch_kite_historical(kite, sym, days=450, instrument_map=instrument_map)
         
         if not df.empty:
             bm_data[sym] = df
@@ -432,11 +431,6 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode):
     instrument_map = load_kite_instrument_map(kite)
     st.session_state.instrument_map = instrument_map
     
-    # Debug: Show available index symbols
-    st.sidebar.info("🔍 Checking index availability...")
-    available_indices = list(instrument_map["indices"].keys())
-    st.sidebar.text(f"Found {len(available_indices)} indices")
-    
     # Fetch benchmark data FIRST (more reliable sequentially)
     with st.spinner("📊 Fetching benchmark indices..."):
         bm_data = fetch_benchmarks_sequential(kite, instrument_map)
@@ -472,39 +466,56 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode):
     selected_df = None
     selected_benchmark = None
     benchmark_rows = []
-    min_required_days = max(RS_LOOKBACK_6M, 200) + 30
+    
+    # REDUCED requirement: need 200 DMA + 126 lookback = ~326 trading days = ~400 calendar days
+    min_required_days = 250  # Lowered from 250 to be safer
 
+    st.sidebar.markdown("### 📊 Benchmark Analysis")
     for name, sym in BENCHMARK_CANDIDATES.items():
         df = bm_data.get(sym)
         if df is None or df.empty:
-            st.sidebar.warning(f"Skipping {name} - no data")
+            st.sidebar.warning(f"❌ {name}: No data")
             continue
         
-        if len(df) < min_required_days:
-            st.sidebar.warning(f"Skipping {name} - only {len(df)} days (need {min_required_days})")
+        actual_days = len(df)
+        st.sidebar.info(f"📈 {name}: {actual_days} days")
+        
+        if actual_days < min_required_days:
+            st.sidebar.warning(f"⚠️ {name}: Need {min_required_days}, got {actual_days}")
+            continue
+        
+        # Check if we have enough data for 6M lookback
+        if actual_days < RS_LOOKBACK_6M:
+            st.sidebar.warning(f"⚠️ {name}: Need {RS_LOOKBACK_6M} for RS calc, got {actual_days}")
             continue
 
-        ret = df["Close"].iloc[-1] / df["Close"].iloc[-RS_LOOKBACK_6M] - 1
-        benchmark_rows.append({
-            "Benchmark": name,
-            "Return_6M": round(ret * 100, 2),
-            "Days": len(df),
-            "Status": "✅ Selected" if ret > best_ret else ""
-        })
+        try:
+            ret = df["Close"].iloc[-1] / df["Close"].iloc[-RS_LOOKBACK_6M] - 1
+            benchmark_rows.append({
+                "Benchmark": name,
+                "Return_6M": round(ret * 100, 2),
+                "Days": actual_days,
+                "Status": "✅ Selected" if ret > best_ret else ""
+            })
 
-        if ret > best_ret:
-            best_ret = ret
-            selected_df = df
-            selected_benchmark = name
+            if ret > best_ret:
+                best_ret = ret
+                selected_df = df
+                selected_benchmark = name
+                st.sidebar.success(f"✅ Best so far: {name} ({ret*100:.2f}%)")
+        except Exception as e:
+            st.sidebar.error(f"❌ {name}: Calc error - {str(e)}")
+            continue
 
     # Validate benchmark
     if selected_df is None or selected_df.empty:
         st.error("❌ No valid benchmark found with sufficient history.")
+        st.error(f"Required: {min_required_days} trading days, need data for 6M lookback ({RS_LOOKBACK_6M} days)")
         if benchmark_rows:
             st.dataframe(pd.DataFrame(benchmark_rows))
         return pd.DataFrame(), None, pd.DataFrame()
 
-    st.success(f"📊 Selected benchmark: {selected_benchmark} ({len(selected_df)} days)")
+    st.success(f"📊 Selected benchmark: {selected_benchmark} ({len(selected_df)} days, {best_ret*100:.2f}% return)")
 
     # Scan stocks
     results = []
@@ -518,11 +529,17 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode):
 
     with st.spinner(f"🔍 Scanning {len(stock_data)} stocks against {selected_benchmark}..."):
         for sym, df in stock_data.items():
-            if df.empty or len(df) < 250:
+            if df.empty or len(df) < min_required_days:
                 filter_stats["short_history"] += 1
                 continue
 
             close = df["Close"]
+            
+            # Check if we have enough data for all calculations
+            if len(close) < max(200, RS_LOOKBACK_6M):
+                filter_stats["short_history"] += 1
+                continue
+            
             price = close.iloc[-1]
             dma200 = close.rolling(200).mean().iloc[-1]
             liq = (close * df["Volume"]).tail(30).mean() / 1e7
@@ -547,7 +564,8 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode):
                              selected_df["Close"].iloc[-RS_LOOKBACK_3M])
 
                 rs_delta = rs3 - rs6
-            except:
+            except Exception as e:
+                print(f"RS calc failed for {sym}: {e}")
                 continue
             
             # Calculate RSI at multiple timeframes
@@ -583,6 +601,7 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode):
         with st.expander("🔍 Filter Statistics"):
             for key, val in filter_stats.items():
                 st.write(f"**{key}:** {val}")
+        return df, selected_benchmark, pd.DataFrame(benchmark_rows) if benchmark_rows else pd.DataFrame()
     
     # Calculate RS rank
     df["RS_Rank"] = df["RS_6M"].rank(pct=True) * 100
@@ -592,7 +611,7 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode):
     )
     
     # Create benchmark table
-    bm_table = pd.DataFrame(benchmark_rows).sort_values("Return_6M", ascending=False)
+    bm_table = pd.DataFrame(benchmark_rows).sort_values("Return_6M", ascending=False) if benchmark_rows else pd.DataFrame()
 
     # Display filter statistics
     st.sidebar.markdown("---")
@@ -684,16 +703,18 @@ def main():
                 st.caption("All RS calculations are relative to this index")
             
             with col2:
-                best_perf = bm_table.iloc[0]["Return_6M"]
-                st.metric("6M Return", f"{best_perf}%")
+                if not bm_table.empty:
+                    best_perf = bm_table.iloc[0]["Return_6M"]
+                    st.metric("6M Return", f"{best_perf}%")
 
             # Benchmark comparison table
-            with st.expander("📈 View All Benchmark Returns"):
-                st.dataframe(
-                    bm_table,
-                    hide_index=True,
-                    use_container_width=True
-                )
+            if not bm_table.empty:
+                with st.expander("📈 View All Benchmark Returns"):
+                    st.dataframe(
+                        bm_table,
+                        hide_index=True,
+                        use_container_width=True
+                    )
 
             st.markdown("---")
             st.markdown(f"### 🎯 Top RS Leaders (Rank ≥ {min_rs}%)")
@@ -783,7 +804,7 @@ def main():
         **🚀 Performance Optimizations:**
         - **Pre-filtering**: Quote API eliminates low-liquidity stocks before fetching historical data
         - **Parallel processing**: 5 concurrent workers with rate limiting (3 req/sec)
-        - **Reduced data range**: 300 days instead of 730 (sufficient for all calculations)
+        - **Optimized data range**: 450 days (~320 trading days) for all calculations
         - **Result**: 10-15x faster scans (Full NSE: ~3-5 min vs 30-40 min)
         
         **Relative Strength (RS) Strategy:**
