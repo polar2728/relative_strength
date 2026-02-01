@@ -47,7 +47,6 @@ class RateLimiter:
         def wrapper(*args, **kwargs):
             with self.lock:
                 now = time.time()
-                # Remove calls older than period
                 self.calls = [call for call in self.calls if call > now - self.period]
                 
                 if len(self.calls) >= self.max_calls:
@@ -73,12 +72,11 @@ def get_kite_from_secrets():
         kite.set_access_token(access_token)
         
         profile = kite.profile()
-        
         st.sidebar.success(f"✅ Connected: {profile['user_name']}")
         return kite
         
     except Exception as e:
-        st.sidebar.error(f"❌ Auth failed: Update secrets → {str(e)[:50]}")
+        st.sidebar.error(f"❌ Auth failed: {str(e)[:50]}")
         return None
 
 def get_kite():
@@ -101,8 +99,6 @@ def load_kite_instrument_map(_kite):
     eq_map = dict(zip(eq["tradingsymbol"], eq["instrument_token"]))
     idx_map = dict(zip(idx["tradingsymbol"], idx["instrument_token"]))
 
-    st.sidebar.success(f"📊 {len(eq_map)} equities, {len(idx_map)} indices loaded")
-    
     return {"equities": eq_map, "indices": idx_map}
 
 # ─────────────────────────────────────────────────────────────
@@ -126,11 +122,9 @@ def prefilter_universe(kite, symbols, instrument_map, min_liq_cr=5):
         return symbols
     
     passed = []
-    total_batches = (len(tokens) + 499) // 500
     
     for batch_idx in range(0, len(tokens), 500):
         batch = tokens[batch_idx:batch_idx+500]
-        batch_num = (batch_idx // 500) + 1
         
         try:
             quotes = kite.quote(batch)
@@ -141,23 +135,17 @@ def prefilter_universe(kite, symbols, instrument_map, min_liq_cr=5):
                 
                 if ltp > 0 and volume > 0:
                     daily_liq = (ltp * volume) / 1e7
-                    
                     if daily_liq >= min_liq_cr * 0.3:
                         passed.append(symbol_map[instrument])
             
-            if batch_num < total_batches:
-                time.sleep(0.35)
+            time.sleep(0.35)
                 
-        except Exception as e:
-            print(f"Quote API error for batch {batch_num}: {e}")
+        except Exception:
             for inst in batch:
                 if inst in symbol_map:
                     passed.append(symbol_map[inst])
     
-    if len(passed) == 0:
-        return symbols
-    
-    return passed
+    return passed if len(passed) > 0 else symbols
 
 # ─────────────────────────────────────────────────────────────
 # HISTORICAL DATA
@@ -168,7 +156,7 @@ def prefilter_universe(kite, symbols, instrument_map, min_liq_cr=5):
     retry=retry_if_exception_type((requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError))
 )
 def fetch_kite_historical_core(kite, symbol, days=450, instrument_map=None):
-    """Core fetch function - 450 days to ensure 250+ trading days"""
+    """Core fetch function"""
     from_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
     to_date   = datetime.now().strftime("%Y-%m-%d")
 
@@ -205,7 +193,7 @@ def fetch_kite_historical_core(kite, symbol, days=450, instrument_map=None):
         df.columns = ["Open", "High", "Low", "Close", "Volume"]
         return df
 
-    except Exception as e:
+    except Exception:
         return pd.DataFrame()
 
 rate_limiter = RateLimiter(max_calls=3, period=1.0)
@@ -216,23 +204,21 @@ def fetch_kite_historical(kite, symbol, days=450, instrument_map=None):
     return fetch_kite_historical_core(kite, symbol, days, instrument_map)
 
 # ─────────────────────────────────────────────────────────────
-# PARALLEL BATCH FETCH - FIXED THREADING ISSUES
+# PARALLEL BATCH FETCH
 # ─────────────────────────────────────────────────────────────
 def fetch_in_batches_parallel(kite, symbols, instrument_map, max_workers=5):
-    """Parallel fetch with rate limiting - FIXED threading context issues"""
+    """Parallel fetch with rate limiting"""
     results = {}
     total = len(symbols)
     
-    # Create progress tracking outside threads
     progress_container = st.sidebar.empty()
     status_container = st.sidebar.empty()
     
-    processed = [0]  # Use list for mutable counter
+    processed = [0]
     successful = [0]
     lock = threading.Lock()
     
     def fetch_symbol(sym):
-        """Fetch symbol data - no Streamlit calls inside thread"""
         try:
             df = fetch_kite_historical(kite, sym, days=450, instrument_map=instrument_map)
             
@@ -240,39 +226,34 @@ def fetch_in_batches_parallel(kite, symbols, instrument_map, max_workers=5):
                 if not df.empty:
                     successful[0] += 1
                 processed[0] += 1
-                # Return data, don't update UI here
                 return sym, df
             
-        except Exception as e:
+        except Exception:
             with lock:
                 processed[0] += 1
             return sym, pd.DataFrame()
     
-    status_container.info(f"🚀 Starting parallel fetch with {max_workers} workers...")
+    status_container.info(f"🚀 Fetching {total} symbols...")
     
-    # Submit all tasks
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(fetch_symbol, sym): sym for sym in symbols}
         
-        # Process completed futures
         for future in as_completed(futures):
             try:
                 sym, df = future.result()
                 results[sym] = df
                 
-                # Update UI in main thread
                 progress = processed[0] / total
                 progress_container.progress(progress)
                 
-                if processed[0] % 5 == 0:  # Update every 5 symbols
+                if processed[0] % 10 == 0:
                     status_container.info(f"⏳ {processed[0]}/{total} | {successful[0]} valid")
                 
-            except Exception as e:
-                print(f"Future processing error: {e}")
+            except Exception:
+                pass
     
-    # Final update
     progress_container.progress(1.0)
-    status_container.success(f"✅ Complete: {successful[0]}/{total} symbols fetched")
+    status_container.success(f"✅ Fetched {successful[0]}/{total} symbols")
     
     return results
 
@@ -280,20 +261,21 @@ def fetch_in_batches_parallel(kite, symbols, instrument_map, max_workers=5):
 # SEQUENTIAL FETCH FOR BENCHMARKS
 # ─────────────────────────────────────────────────────────────
 def fetch_benchmarks_sequential(kite, instrument_map):
-    """Fetch benchmarks sequentially with better error handling"""
+    """Fetch benchmarks sequentially"""
     bm_data = {}
     
-    for name, sym in BENCHMARK_CANDIDATES.items():
-        st.sidebar.info(f"Fetching {name}...")
+    progress = st.sidebar.empty()
+    
+    for idx, (name, sym) in enumerate(BENCHMARK_CANDIDATES.items(), 1):
+        progress.info(f"📊 Fetching benchmarks... ({idx}/{len(BENCHMARK_CANDIDATES)})")
         df = fetch_kite_historical(kite, sym, days=450, instrument_map=instrument_map)
         
         if not df.empty:
             bm_data[sym] = df
-            st.sidebar.success(f"✓ {name}: {len(df)} days")
-        else:
-            st.sidebar.warning(f"✗ {name}: Failed")
         
         time.sleep(0.35)
+    
+    progress.success(f"✅ Loaded {len(bm_data)} benchmarks")
     
     return bm_data
 
@@ -314,7 +296,7 @@ def load_nse_universe():
 
 @st.cache_resource(ttl=86400)
 def load_nifty50_symbols():
-    """Load Nifty 50 constituents with retry logic"""
+    """Load Nifty 50 constituents"""
     url = "https://archives.nseindia.com/content/indices/ind_nifty50list.csv"
 
     headers = {
@@ -333,11 +315,10 @@ def load_nifty50_symbols():
         except Exception:
             time.sleep(2)
 
-    st.error("❌ Failed to load Nifty 50 list from NSE")
     return []
 
 # ─────────────────────────────────────────────────────────────
-# INDICATORS
+# INDICATORS - FIXED RSI_M CALCULATION
 # ─────────────────────────────────────────────────────────────
 def compute_rsi(series, period=14):
     """Compute RSI with edge case handling"""
@@ -368,24 +349,22 @@ def log_rs(p, p0, b, b0):
 # RS SCAN
 # ─────────────────────────────────────────────────────────────
 def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode):
-    """Main RS scanning logic with pre-filtering and parallel fetch"""
+    """Main RS scanning logic"""
     
     # Load instrument maps
     instrument_map = load_kite_instrument_map(kite)
     st.session_state.instrument_map = instrument_map
     
-    # Fetch benchmark data FIRST
+    # Fetch benchmarks
     with st.spinner("📊 Fetching benchmark indices..."):
         bm_data = fetch_benchmarks_sequential(kite, instrument_map)
     
     if not bm_data:
-        st.error("❌ Failed to fetch any benchmark data.")
+        st.error("❌ Failed to fetch benchmark data.")
         st.stop()
     
-    st.success(f"✅ Fetched {len(bm_data)} benchmarks successfully")
-    
-    # PRE-FILTER
-    with st.spinner("🔍 Pre-filtering universe with Quote API..."):
+    # Pre-filter
+    with st.spinner("🔍 Pre-filtering universe..."):
         filtered_symbols = prefilter_universe(kite, symbols, instrument_map, min_liq)
     
     reduction_pct = (1 - len(filtered_symbols) / len(symbols)) * 100 if len(symbols) > 0 else 0
@@ -395,8 +374,8 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode):
         st.error("❌ No stocks passed pre-filtering.")
         return pd.DataFrame(), None, pd.DataFrame()
 
-    # PARALLEL FETCH
-    with st.spinner(f"📥 Fetching {len(filtered_symbols)} stocks in parallel..."):
+    # Parallel fetch
+    with st.spinner(f"📥 Fetching historical data..."):
         stock_data = fetch_in_batches_parallel(
             kite, 
             filtered_symbols, 
@@ -404,25 +383,19 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode):
             max_workers=5
         )
 
-    # Select best performing benchmark
+    # Select best benchmark
     best_ret = -1e9
     selected_df = None
     selected_benchmark = None
     benchmark_rows = []
     min_required_days = 250
 
-    st.sidebar.markdown("### 📊 Benchmark Analysis")
     for name, sym in BENCHMARK_CANDIDATES.items():
         df = bm_data.get(sym)
-        if df is None or df.empty:
+        if df is None or df.empty or len(df) < min_required_days:
             continue
         
-        actual_days = len(df)
-        
-        if actual_days < min_required_days:
-            continue
-        
-        if actual_days < RS_LOOKBACK_6M:
+        if len(df) < RS_LOOKBACK_6M:
             continue
 
         try:
@@ -430,22 +403,20 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode):
             benchmark_rows.append({
                 "Benchmark": name,
                 "Return_6M": round(ret * 100, 2),
-                "Days": actual_days,
-                "Status": "✅ Selected" if ret > best_ret else ""
+                "Days": len(df),
+                "Status": "✅" if ret > best_ret else ""
             })
 
             if ret > best_ret:
                 best_ret = ret
                 selected_df = df
                 selected_benchmark = name
-        except Exception as e:
+        except Exception:
             continue
 
     if selected_df is None or selected_df.empty:
-        st.error("❌ No valid benchmark found with sufficient history.")
+        st.error("❌ No valid benchmark found.")
         return pd.DataFrame(), None, pd.DataFrame()
-
-    st.success(f"📊 Selected benchmark: {selected_benchmark} ({len(selected_df)} days)")
 
     # Scan stocks
     results = []
@@ -457,7 +428,7 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode):
         "passed": 0
     }
 
-    with st.spinner(f"🔍 Scanning {len(stock_data)} stocks against {selected_benchmark}..."):
+    with st.spinner(f"🔍 Analyzing stocks vs {selected_benchmark}..."):
         for sym, df in stock_data.items():
             if df.empty or len(df) < min_required_days:
                 filter_stats["short_history"] += 1
@@ -491,12 +462,19 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode):
                              selected_df["Close"].iloc[-RS_LOOKBACK_3M])
 
                 rs_delta = rs3 - rs6
-            except Exception as e:
+            except Exception:
                 continue
             
+            # Calculate RSI - FIXED: Use resample('MS') for month-start instead of 'ME'
             rsi_d = compute_rsi(close)
-            rsi_w = compute_rsi(close.resample("W-FRI").last()) if len(close) > 100 else None
-            rsi_m = compute_rsi(close.resample("ME").last()) if len(close) > 400 else None
+            
+            # Weekly RSI
+            weekly_close = close.resample("W-FRI").last().dropna()
+            rsi_w = compute_rsi(weekly_close) if len(weekly_close) > 20 else None
+            
+            # Monthly RSI - FIXED: resample to month-start and ensure enough data
+            monthly_close = close.resample("MS").last().dropna()
+            rsi_m = compute_rsi(monthly_close, period=14) if len(monthly_close) > 20 else None
 
             clean = sym.replace(".NS", "")
             tv = f"https://tradingview.com/chart/?symbol=NSE%3A{clean}"
@@ -520,7 +498,7 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode):
     df = pd.DataFrame(results)
     
     if len(df) == 0:
-        st.warning("⚠️ No stocks passed the filters.")
+        st.warning("⚠️ No stocks passed all filters.")
         with st.expander("🔍 Filter Statistics"):
             for key, val in filter_stats.items():
                 st.write(f"**{key}:** {val}")
@@ -528,17 +506,18 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode):
     
     df["RS_Rank"] = df["RS_6M"].rank(pct=True) * 100
     df["Momentum"] = np.where(
-        df["RS_Delta"] > 0, "🚀 Improving", 
-        np.where(df["RS_Delta"] < 0, "📉 Slowing", "➡️ Stable")
+        df["RS_Delta"] > 0, "🚀 Accelerating", 
+        np.where(df["RS_Delta"] < 0, "📉 Decelerating", "➡️ Stable")
     )
     
     bm_table = pd.DataFrame(benchmark_rows).sort_values("Return_6M", ascending=False) if benchmark_rows else pd.DataFrame()
 
+    # Summary stats
     st.sidebar.markdown("---")
-    st.sidebar.markdown("### 📊 Scan Summary")
-    st.sidebar.metric("Stocks Scanned", filter_stats["total"])
-    st.sidebar.metric("Passed Filters", filter_stats["passed"])
-    st.sidebar.metric("Final Results", len(df[df["RS_Rank"] >= min_rs]))
+    st.sidebar.markdown("### 📊 Scan Results")
+    st.sidebar.metric("Total Scanned", filter_stats["total"])
+    st.sidebar.metric("Passed All Filters", filter_stats["passed"])
+    st.sidebar.metric(f"RS Rank ≥ {min_rs}%", len(df[df["RS_Rank"] >= min_rs]))
 
     return (
         df[df["RS_Rank"] >= min_rs].sort_values("RS_Rank", ascending=False),
@@ -553,40 +532,34 @@ def main():
     st.markdown("""
     <div style='background: linear-gradient(135deg,#667eea,#764ba2,#f093fb);
                 padding:1.2rem;border-radius:14px;color:white;text-align:center'>
-        <h2 style='margin:0'>🏆 NSE RS Leaders PRO - OPTIMIZED</h2>
-        <p style='margin:0;font-size:0.9rem'>Parallel processing • Pre-filtering • 10-15x faster</p>
+        <h2 style='margin:0'>🏆 NSE RS Leaders Scanner</h2>
+        <p style='margin:0;font-size:0.9rem'>Relative Strength • Momentum Analysis • Multi-Timeframe RSI</p>
     </div>
     """, unsafe_allow_html=True)
 
     kite = get_kite_from_secrets()
     if not kite:
-        st.error("⚠️ **Admin:** Update KITE_ACCESS_TOKEN in Streamlit Cloud settings")
+        st.error("⚠️ Update KITE_ACCESS_TOKEN in Streamlit Cloud settings")
         st.stop()
 
-    st.sidebar.markdown("### ⚙️ Scan Configuration")
+    st.sidebar.markdown("### ⚙️ Configuration")
     
     universe = st.sidebar.radio(
         "Universe",
         ["Nifty 50", "Full NSE"],
-        help="Nifty 50 = ~30 sec, Full NSE = ~3-5 min (optimized)"
-    )
-    
-    benchmark_mode = st.sidebar.radio(
-        "Benchmark Selection", 
-        ["Auto"],
-        help="Automatically selects the best performing benchmark index"
+        help="Nifty 50: ~1 min | Full NSE: ~5 min"
     )
     
     min_rs = st.sidebar.slider(
         "Min RS Rank %",
         60, 95, MIN_RS_RANK,
-        help="Only show stocks with RS rank above this percentile"
+        help="Minimum RS percentile rank"
     )
     
     min_liq = st.sidebar.slider(
         "Min Liquidity ₹Cr",
         1, 20, MIN_LIQUIDITY_CR,
-        help="Minimum average daily liquidity in crores"
+        help="Minimum 30-day avg daily liquidity"
     )
 
     if st.sidebar.button("🚀 RUN SCAN", use_container_width=True, type="primary"):
@@ -597,21 +570,18 @@ def main():
             st.error("❌ Failed to load stock universe")
             st.stop()
 
-        st.info(f"📊 Loaded {len(symbols)} symbols from {universe}")
-
         scan_start = time.time()
-        df, selected_benchmark, bm_table = rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode)
+        df, selected_benchmark, bm_table = rs_scan(kite, symbols, name_map, min_rs, min_liq, "Auto")
         scan_duration = time.time() - scan_start
 
         if len(df) > 0:
-            st.success(f"✅ Found **{len(df)} stocks** in {scan_duration:.1f}s")
+            st.success(f"✅ Found **{len(df)} stocks** in {scan_duration:.0f}s")
             
             st.markdown("---")
-            col1, col2 = st.columns([2, 1])
+            col1, col2 = st.columns([3, 1])
             
             with col1:
                 st.markdown(f"### 📊 Benchmark: **{selected_benchmark}**")
-                st.caption("All RS calculations are relative to this index")
             
             with col2:
                 if not bm_table.empty:
@@ -619,11 +589,11 @@ def main():
                     st.metric("6M Return", f"{best_perf}%")
 
             if not bm_table.empty:
-                with st.expander("📈 View All Benchmark Returns"):
+                with st.expander("📈 All Benchmark Returns"):
                     st.dataframe(bm_table, hide_index=True, use_container_width=True)
 
             st.markdown("---")
-            st.markdown(f"### 🎯 Top RS Leaders (Rank ≥ {min_rs}%)")
+            st.markdown(f"### 🎯 Top RS Leaders (≥ {min_rs}%)")
 
             def rsi_color(v):
                 if pd.isna(v): return ""
@@ -655,7 +625,7 @@ def main():
                 hide_index=True,
                 column_config={
                     "Chart": st.column_config.LinkColumn("Chart", display_text="📈 View"),
-                    "Momentum": st.column_config.TextColumn("Momentum", help="RS 3M vs 6M trend")
+                    "Momentum": st.column_config.TextColumn("Momentum", help="RS 3M vs 6M")
                 },
                 height=600
             )
@@ -663,16 +633,15 @@ def main():
             csv = df.to_csv(index=False).encode("utf-8")
             timestamp = datetime.now().strftime("%Y%m%d_%H%M")
             st.download_button(
-                "📥 Download Results as CSV",
+                "📥 Download CSV",
                 csv,
-                f"RS_Leaders_{selected_benchmark.replace(' ', '_')}_{timestamp}.csv",
+                f"RS_Leaders_{timestamp}.csv",
                 mime="text/csv",
-                use_container_width=True,
-                type="primary"
+                use_container_width=True
             )
 
             st.markdown("---")
-            st.markdown("### 💡 Key Insights")
+            st.markdown("### 💡 Key Metrics")
             
             col1, col2, col3, col4 = st.columns(4)
             
@@ -681,31 +650,37 @@ def main():
             
             with col2:
                 improving = len(df[df["RS_Delta"] > 0])
-                st.metric("Improving Momentum", f"{improving} stocks")
+                st.metric("Accelerating", f"{improving}/{len(df)}")
             
             with col3:
                 overbought = len(df[df["RSI_D"] > 70])
-                st.metric("RSI > 70 (Daily)", f"{overbought} stocks")
+                st.metric("Overbought (D)", f"{overbought}")
             
             with col4:
                 avg_liq = df["LiquidityCr"].mean()
                 st.metric("Avg Liquidity", f"₹{avg_liq:.1f}Cr")
 
         else:
-            st.warning("⚠️ No stocks passed the filters. Try adjusting the criteria.")
+            st.warning("⚠️ No stocks passed filters. Try relaxing criteria.")
 
-    with st.expander("ℹ️ How This Works (Optimized Version)"):
+    with st.expander("ℹ️ How It Works"):
         st.markdown("""
-        **🚀 Performance Optimizations:**
-        - **Pre-filtering**: Quote API eliminates low-liquidity stocks
-        - **Parallel processing**: 5 workers with rate limiting (3 req/sec)
-        - **Optimized data range**: 450 days for all calculations
-        - **Result**: 10-15x faster (Full NSE: ~3-5 min vs 30-40 min)
+        **Strategy:**
+        1. Selects best-performing benchmark (6M return)
+        2. Calculates log-based Relative Strength vs benchmark
+        3. Filters: Above 200 DMA, Min liquidity ₹5Cr
+        4. Ranks by RS percentile (0-100%)
+        5. Shows momentum trend (3M vs 6M RS)
+        
+        **RSI Levels:**
+        - 🟢 Green (≥60): Overbought zone
+        - 🔴 Red (≤40): Oversold zone
+        - ⚪ Neutral (40-60): Normal range
         
         **Best Practices:**
-        - Focus on RS Rank > 80% with improving momentum
-        - Avoid stocks with RSI > 70 on all timeframes
-        - Check TradingView charts before positions
+        - Focus on RS Rank > 85% + accelerating momentum
+        - Avoid RSI > 70 across all timeframes (overextended)
+        - Confirm with chart patterns before entry
         """)
 
 if __name__ == "__main__":
