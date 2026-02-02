@@ -28,8 +28,7 @@ BENCHMARK_CANDIDATES = {
     "Nifty 100": "NIFTY 100",
     "Nifty 200": "NIFTY 200",
     "Nifty 500": "NIFTY 500",
-    "Nifty Midcap 150": "NIFTY MIDCAP 150",
-    "Nifty Total Market": "NIFTY TOTAL MARKET",
+    "Nifty Midcap 150": "NIFTY MIDCAP 150"
 }
 
 # ─────────────────────────────────────────────────────────────
@@ -563,6 +562,9 @@ def calculate_entry_score(df, rsi_d, vol_ratio, stage, pullback_pct):
 # ─────────────────────────────────────────────────────────────
 # RS SCAN - ENHANCED FOR SWING TRADING
 # ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
+# RS SCAN - FIXED BENCHMARK SELECTION
+# ─────────────────────────────────────────────────────────────
 def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode, trading_style):
     """Main RS scanning logic with swing trading enhancements"""
     
@@ -598,7 +600,23 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode, trading_st
             max_workers=5
         )
 
-    # Select best benchmark
+    # ═══════════════════════════════════════════════════════════
+    # FIXED: Determine lookback based on trading style
+    # ═══════════════════════════════════════════════════════════
+    if trading_style == "Swing (3M Focus)":
+        benchmark_lookback = RS_LOOKBACK_3M  # 63 days
+        primary_rs = "RS_3M"
+        rs_column = "RS_3M"
+        lookback_label = "3M"
+    else:  # Position or Hybrid
+        benchmark_lookback = RS_LOOKBACK_6M  # 126 days
+        primary_rs = "RS_6M"
+        rs_column = "RS_6M"
+        lookback_label = "6M"
+
+    # ═══════════════════════════════════════════════════════════
+    # FIXED: Select benchmark using matching timeframe
+    # ═══════════════════════════════════════════════════════════
     best_ret = -1e9
     selected_df = None
     selected_benchmark = None
@@ -610,14 +628,17 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode, trading_st
         if df is None or df.empty or len(df) < min_required_days:
             continue
         
-        if len(df) < RS_LOOKBACK_6M:
+        # Check if we have enough data for the selected lookback
+        if len(df) < benchmark_lookback:
             continue
 
         try:
-            ret = df["Close"].iloc[-1] / df["Close"].iloc[-RS_LOOKBACK_6M] - 1
+            # FIXED: Use matching lookback for benchmark selection
+            ret = df["Close"].iloc[-1] / df["Close"].iloc[-benchmark_lookback] - 1
+            
             benchmark_rows.append({
                 "Benchmark": name,
-                "Return_6M": round(ret * 100, 2),
+                f"Return_{lookback_label}": round(ret * 100, 2),
                 "Days": len(df),
                 "Status": "✅" if ret > best_ret else ""
             })
@@ -633,13 +654,8 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode, trading_st
         st.error("❌ No valid benchmark found.")
         return pd.DataFrame(), None, pd.DataFrame()
 
-    # Determine primary RS metric based on trading style
-    if trading_style == "Swing (3M Focus)":
-        primary_rs = "RS_3M"
-        rs_column = "RS_3M"
-    else:  # Position or Hybrid
-        primary_rs = "RS_6M"
-        rs_column = "RS_6M"
+    # Show which timeframe was used for benchmark selection
+    st.info(f"✅ Selected {selected_benchmark} based on {lookback_label} performance ({best_ret*100:.2f}%)")
 
     # Scan stocks
     results = []
@@ -652,7 +668,7 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode, trading_st
         "passed": 0
     }
 
-    with st.spinner(f"🔍 Analyzing stocks vs {selected_benchmark}..."):
+    with st.spinner(f"🔍 Analyzing stocks vs {selected_benchmark} ({lookback_label})..."):
         for sym, df in stock_data.items():
             if df.empty or len(df) < min_required_days:
                 filter_stats["short_history"] += 1
@@ -660,7 +676,7 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode, trading_st
 
             close = df["Close"]
             
-            if len(close) < max(200, RS_LOOKBACK_6M):
+            if len(close) < max(200, benchmark_lookback):
                 filter_stats["short_history"] += 1
                 continue
             
@@ -683,6 +699,7 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode, trading_st
                 continue
 
             try:
+                # Calculate BOTH RS metrics (we always show both)
                 rs6 = log_rs(price, close.iloc[-RS_LOOKBACK_6M],
                              selected_df["Close"].iloc[-1],
                              selected_df["Close"].iloc[-RS_LOOKBACK_6M])
@@ -752,7 +769,7 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode, trading_st
                 st.write(f"**{key}:** {val}")
         return df, selected_benchmark, pd.DataFrame(benchmark_rows) if benchmark_rows else pd.DataFrame()
     
-    # Calculate RS rank based on trading style
+    # FIXED: Calculate RS rank based on trading style (using matching timeframe)
     df["RS_Rank"] = df[rs_column].rank(pct=True) * 100
     
     df["Momentum"] = np.where(
@@ -760,11 +777,14 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode, trading_st
         np.where(df["RS_Delta"] < 0, "📉 Decelerating", "➡️ Stable")
     )
     
-    bm_table = pd.DataFrame(benchmark_rows).sort_values("Return_6M", ascending=False) if benchmark_rows else pd.DataFrame()
+    # FIXED: Sort benchmark table by the matching timeframe column
+    bm_table = pd.DataFrame(benchmark_rows).sort_values(f"Return_{lookback_label}", ascending=False) if benchmark_rows else pd.DataFrame()
 
     # Summary stats
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 📊 Scan Results")
+    st.sidebar.metric("Trading Style", trading_style)
+    st.sidebar.metric("Timeframe", lookback_label)
     st.sidebar.metric("Total Scanned", filter_stats["total"])
     st.sidebar.metric("Stage 4 Filtered", filter_stats["stage_4"])
     st.sidebar.metric("Passed All Filters", filter_stats["passed"])
@@ -852,8 +872,15 @@ def main():
             
             with col2:
                 if not bm_table.empty:
-                    best_perf = bm_table.iloc[0]["Return_6M"]
-                    st.metric("6M Return", f"{best_perf}%")
+                    # Determine which column to show based on trading style
+                    if trading_style == "Swing (3M Focus)":
+                        perf_col = "Return_3M"
+                    else:
+                        perf_col = "Return_6M"
+                    
+                    best_perf = bm_table.iloc[0][perf_col]
+                    timeframe = "3M" if trading_style == "Swing (3M Focus)" else "6M"
+                    st.metric(f"{timeframe} Return", f"{best_perf}%")
 
             if not bm_table.empty:
                 with st.expander("📈 All Benchmark Returns"):
