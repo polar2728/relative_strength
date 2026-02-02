@@ -318,15 +318,13 @@ def load_nifty50_symbols():
     return []
 
 # ─────────────────────────────────────────────────────────────
-# INDICATORS - FIXED RSI CALCULATION
+# INDICATORS - WITH VOLUME ANALYSIS
 # ─────────────────────────────────────────────────────────────
 def compute_rsi(series, period=14):
     """Compute RSI with edge case handling"""
-    # Ensure series is not empty and has enough data
     if series is None or len(series) < period + 1:
         return None
     
-    # Remove any NaN values
     series = series.dropna()
     
     if len(series) < period + 1:
@@ -336,7 +334,6 @@ def compute_rsi(series, period=14):
     gain = delta.where(delta > 0, 0).rolling(period).mean()
     loss = -delta.where(delta < 0, 0).rolling(period).mean()
     
-    # Get the last valid value
     gain_val = gain.iloc[-1]
     loss_val = loss.iloc[-1]
     
@@ -357,9 +354,7 @@ def resample_to_weekly(close_series):
     if close_series is None or len(close_series) < 20:
         return None
     
-    # Resample to weekly, taking last value of each week
     weekly = close_series.resample('W-FRI').last()
-    # Drop NaN values
     weekly = weekly.dropna()
     
     return weekly if len(weekly) >= 20 else None
@@ -369,9 +364,7 @@ def resample_to_monthly(close_series):
     if close_series is None or len(close_series) < 60:
         return None
     
-    # Resample to month end, taking last value of each month
     monthly = close_series.resample('M').last()
-    # Drop NaN values
     monthly = monthly.dropna()
     
     return monthly if len(monthly) >= 15 else None
@@ -380,11 +373,59 @@ def log_rs(p, p0, b, b0):
     """Log-based relative strength calculation"""
     return np.log(p / p0) - np.log(b / b0)
 
+def calculate_volume_metrics(df):
+    """
+    Calculate volume shock metrics
+    Returns: dict with volume analysis metrics
+    """
+    if df.empty or len(df) < 20:
+        return {
+            'vol_ratio': None,
+            'vol_spike': None,
+            'vol_trend': None,
+            'vol_breakout': False
+        }
+    
+    volume = df["Volume"]
+    
+    # Volume ratio: Today's volume vs 20-day average
+    vol_20d_avg = volume.rolling(20).mean().iloc[-1]
+    vol_today = volume.iloc[-1]
+    vol_ratio = round(vol_today / vol_20d_avg, 2) if vol_20d_avg > 0 else None
+    
+    # Volume spike: Compare last 5 days avg vs previous 20 days avg
+    vol_recent_5d = volume.tail(5).mean()
+    vol_prev_20d = volume.iloc[-25:-5].mean() if len(volume) >= 25 else vol_20d_avg
+    vol_spike = round(vol_recent_5d / vol_prev_20d, 2) if vol_prev_20d > 0 else None
+    
+    # Volume trend: Simple slope of 20-day volume MA
+    if len(volume) >= 40:
+        vol_ma = volume.rolling(20).mean()
+        vol_ma_recent = vol_ma.tail(20)
+        # Positive slope = increasing volume
+        vol_trend = "📈" if vol_ma_recent.iloc[-1] > vol_ma_recent.iloc[0] else "📉"
+    else:
+        vol_trend = "➡️"
+    
+    # Volume breakout: Vol ratio > 2x AND price near 52-week high
+    close = df["Close"]
+    high_52w = close.tail(252).max() if len(close) >= 252 else close.max()
+    price_pct_from_high = (close.iloc[-1] / high_52w - 1) * 100
+    
+    vol_breakout = (vol_ratio and vol_ratio >= 2.0) and (price_pct_from_high >= -5)
+    
+    return {
+        'vol_ratio': vol_ratio,
+        'vol_spike': vol_spike,
+        'vol_trend': vol_trend,
+        'vol_breakout': vol_breakout
+    }
+
 # ─────────────────────────────────────────────────────────────
-# RS SCAN
+# RS SCAN - WITH VOLUME ANALYSIS
 # ─────────────────────────────────────────────────────────────
 def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode):
-    """Main RS scanning logic"""
+    """Main RS scanning logic with volume analysis"""
     
     # Load instrument maps
     instrument_map = load_kite_instrument_map(kite)
@@ -500,16 +541,17 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode):
             except Exception:
                 continue
             
-            # Calculate RSI at multiple timeframes - FIXED
+            # Calculate RSI at multiple timeframes
             rsi_d = compute_rsi(close)
             
-            # Weekly RSI
             weekly_close = resample_to_weekly(close)
             rsi_w = compute_rsi(weekly_close) if weekly_close is not None else None
             
-            # Monthly RSI
             monthly_close = resample_to_monthly(close)
             rsi_m = compute_rsi(monthly_close) if monthly_close is not None else None
+            
+            # Calculate volume metrics
+            vol_metrics = calculate_volume_metrics(df)
 
             clean = sym.replace(".NS", "")
             tv = f"https://tradingview.com/chart/?symbol=NSE%3A{clean}"
@@ -526,6 +568,10 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode):
                 "RSI_D": rsi_d,
                 "RSI_W": rsi_w,
                 "RSI_M": rsi_m,
+                "Vol_Ratio": vol_metrics['vol_ratio'],
+                "Vol_Spike": vol_metrics['vol_spike'],
+                "Vol_Trend": vol_metrics['vol_trend'],
+                "Vol_Breakout": "🔥" if vol_metrics['vol_breakout'] else "",
                 "Chart": tv
             })
             filter_stats["passed"] += 1
@@ -553,6 +599,11 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode):
     st.sidebar.metric("Total Scanned", filter_stats["total"])
     st.sidebar.metric("Passed All Filters", filter_stats["passed"])
     st.sidebar.metric(f"RS Rank ≥ {min_rs}%", len(df[df["RS_Rank"] >= min_rs]))
+    
+    # Volume breakout count
+    vol_breakouts = len(df[df["Vol_Breakout"] == "🔥"])
+    if vol_breakouts > 0:
+        st.sidebar.metric("🔥 Volume Breakouts", vol_breakouts)
 
     return (
         df[df["RS_Rank"] >= min_rs].sort_values("RS_Rank", ascending=False),
@@ -567,8 +618,8 @@ def main():
     st.markdown("""
     <div style='background: linear-gradient(135deg,#667eea,#764ba2,#f093fb);
                 padding:1.2rem;border-radius:14px;color:white;text-align:center'>
-        <h2 style='margin:0'>🏆 NSE RS Leaders Scanner</h2>
-        <p style='margin:0;font-size:0.9rem'>Relative Strength • Momentum Analysis • Multi-Timeframe RSI</p>
+        <h2 style='margin:0'>🏆 NSE RS Leaders Scanner PRO</h2>
+        <p style='margin:0;font-size:0.9rem'>Relative Strength • Volume Analysis • Multi-Timeframe RSI</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -635,6 +686,12 @@ def main():
                 if v >= 60: return "background-color:#d4edda;color:#155724"
                 if v <= 40: return "background-color:#f8d7da;color:#721c24"
                 return ""
+            
+            def vol_ratio_color(v):
+                if pd.isna(v): return ""
+                if v >= 2.5: return "background-color:#fff3cd;color:#856404;font-weight:bold"
+                if v >= 1.5: return "background-color:#d1ecf1;color:#0c5460"
+                return ""
 
             styled = df.style.format({
                 "Price": "₹{:.2f}",
@@ -646,13 +703,16 @@ def main():
                 "RSI_D": lambda x: f"{x:.1f}" if pd.notna(x) else "-",
                 "RSI_W": lambda x: f"{x:.1f}" if pd.notna(x) else "-",
                 "RSI_M": lambda x: f"{x:.1f}" if pd.notna(x) else "-",
+                "Vol_Ratio": lambda x: f"{x:.2f}x" if pd.notna(x) else "-",
+                "Vol_Spike": lambda x: f"{x:.2f}x" if pd.notna(x) else "-",
                 "RS_Rank": "{:.1f}%"
             }).background_gradient(
                 subset=["RS_Rank"], 
                 cmap="RdYlGn",
                 vmin=min_rs,
                 vmax=100
-            ).map(rsi_color, subset=["RSI_D", "RSI_W", "RSI_M"])
+            ).map(rsi_color, subset=["RSI_D", "RSI_W", "RSI_M"]
+            ).map(vol_ratio_color, subset=["Vol_Ratio"])
 
             st.dataframe(
                 styled,
@@ -660,7 +720,11 @@ def main():
                 hide_index=True,
                 column_config={
                     "Chart": st.column_config.LinkColumn("Chart", display_text="📈 View"),
-                    "Momentum": st.column_config.TextColumn("Momentum", help="RS 3M vs 6M")
+                    "Momentum": st.column_config.TextColumn("Momentum", help="RS 3M vs 6M"),
+                    "Vol_Ratio": st.column_config.TextColumn("Vol Ratio", help="Today vs 20D avg"),
+                    "Vol_Spike": st.column_config.TextColumn("Vol Spike", help="Recent 5D vs prev 20D"),
+                    "Vol_Trend": st.column_config.TextColumn("Vol Trend", help="20D volume MA trend"),
+                    "Vol_Breakout": st.column_config.TextColumn("🔥", help="Vol breakout signal")
                 },
                 height=600
             )
@@ -678,7 +742,7 @@ def main():
             st.markdown("---")
             st.markdown("### 💡 Key Metrics")
             
-            col1, col2, col3, col4 = st.columns(4)
+            col1, col2, col3, col4, col5 = st.columns(5)
             
             with col1:
                 st.metric("Avg RS Rank", f"{df['RS_Rank'].mean():.1f}%")
@@ -689,33 +753,45 @@ def main():
             
             with col3:
                 overbought = len(df[df["RSI_D"] > 70])
-                st.metric("Overbought (D)", f"{overbought}")
+                st.metric("Overbought", f"{overbought}")
             
             with col4:
-                avg_liq = df["LiquidityCr"].mean()
-                st.metric("Avg Liquidity", f"₹{avg_liq:.1f}Cr")
+                vol_breakouts = len(df[df["Vol_Breakout"] == "🔥"])
+                st.metric("🔥 Vol Breakout", f"{vol_breakouts}")
+            
+            with col5:
+                high_vol = len(df[df["Vol_Ratio"] >= 2.0])
+                st.metric("Vol >2x", f"{high_vol}")
 
         else:
             st.warning("⚠️ No stocks passed filters. Try relaxing criteria.")
 
     with st.expander("ℹ️ How It Works"):
         st.markdown("""
-        **Strategy:**
+        **RS Strategy:**
         1. Selects best-performing benchmark (6M return)
         2. Calculates log-based Relative Strength vs benchmark
         3. Filters: Above 200 DMA, Min liquidity ₹5Cr
         4. Ranks by RS percentile (0-100%)
-        5. Shows momentum trend (3M vs 6M RS)
+        
+        **Volume Analysis:**
+        - **Vol Ratio**: Today's volume vs 20-day average (>2x = significant)
+        - **Vol Spike**: Recent 5-day avg vs previous 20-day avg
+        - **Vol Trend**: Direction of 20-day volume moving average
+        - **🔥 Vol Breakout**: High volume (>2x) + price near 52-week high
         
         **RSI Levels:**
         - 🟢 Green (≥60): Overbought zone
         - 🔴 Red (≤40): Oversold zone
-        - ⚪ Neutral (40-60): Normal range
+        
+        **Volume Colors:**
+        - 🟡 Yellow (≥2.5x): Extreme volume spike
+        - 🔵 Blue (≥1.5x): Elevated volume
         
         **Best Practices:**
-        - Focus on RS Rank > 85% + accelerating momentum
-        - Avoid RSI > 70 across all timeframes (overextended)
-        - Confirm with chart patterns before entry
+        - Focus on RS Rank >85% + 🔥 breakout + accelerating momentum
+        - High volume + strong RS = potential breakout candidates
+        - Avoid RSI >70 across all timeframes (overextended)
         """)
 
 if __name__ == "__main__":
