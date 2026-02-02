@@ -317,7 +317,7 @@ def load_nifty50_symbols():
     return []
 
 # ─────────────────────────────────────────────────────────────
-# INDICATORS - ENHANCED FOR SWING TRADING
+# INDICATORS - WITH VOLUME ANALYSIS
 # ─────────────────────────────────────────────────────────────
 def compute_rsi(series, period=14):
     """Compute RSI with edge case handling"""
@@ -417,160 +417,24 @@ def calculate_volume_metrics(df):
     }
 
 # ─────────────────────────────────────────────────────────────
-# NEW: SWING TRADING SPECIFIC INDICATORS
-# ─────────────────────────────────────────────────────────────
-def calculate_stage(df):
-    """Weinstein Stage Analysis - CRITICAL for swing trading"""
-    if df.empty or len(df) < 200:
-        return "Unknown"
-    
-    close = df["Close"]
-    price = close.iloc[-1]
-    
-    # Calculate moving averages
-    dma30 = close.rolling(30).mean().iloc[-1]
-    dma150 = close.rolling(150).mean().iloc[-1]
-    dma200 = close.rolling(200).mean().iloc[-1]
-    
-    # Check if 150 MA is rising
-    dma150_20d_ago = close.rolling(150).mean().iloc[-20] if len(close) >= 170 else dma150
-    ma_rising = dma150 > dma150_20d_ago
-    
-    # Stage 2: Advancing (BEST for swing trading)
-    if price > dma30 > dma150 > dma200 and ma_rising:
-        return "Stage 2 🚀"
-    
-    # Stage 1: Basing (potential setup)
-    if price > dma200:
-        ma_range = abs(dma150 - dma200) / dma200
-        if ma_range < 0.03:  # MAs converging
-            return "Stage 1 📊"
-    
-    # Stage 4: Declining (AVOID)
-    if price < dma200:
-        return "Stage 4 ⚠️"
-    
-    # Stage 3: Topping
-    return "Stage 3 ⚠️"
-
-def calculate_atr_stops(df):
-    """ATR-based stop loss and targets"""
-    if df.empty or len(df) < 14:
-        return {
-            'atr': None,
-            'stop': None,
-            'target': None,
-            'risk_pct': None
-        }
-    
-    close = df["Close"]
-    high = df["High"]
-    low = df["Low"]
-    
-    # True Range
-    tr = pd.DataFrame({
-        'hl': high - low,
-        'hc': abs(high - close.shift(1)),
-        'lc': abs(low - close.shift(1))
-    }).max(axis=1)
-    
-    atr_14 = tr.rolling(14).mean().iloc[-1]
-    price = close.iloc[-1]
-    
-    # Stop at 1.5 ATR
-    stop = round(price - (1.5 * atr_14), 2)
-    
-    # Target at 3 ATR (2:1 R/R)
-    target = round(price + (3 * atr_14), 2)
-    
-    # Risk percentage
-    risk_pct = round((atr_14 * 1.5 / price) * 100, 2)
-    
-    return {
-        'atr': round(atr_14, 2),
-        'stop': stop,
-        'target': target,
-        'risk_pct': risk_pct
-    }
-
-def calculate_pullback_metrics(df):
-    """Pullback quality for swing entry timing"""
-    if df.empty or len(df) < 20:
-        return {
-            'pct_from_high': None,
-            'pullback_quality': None
-        }
-    
-    close = df["Close"]
-    price = close.iloc[-1]
-    
-    # Recent high (20-day)
-    recent_high = close.tail(20).max()
-    pct_from_high = round(((price / recent_high) - 1) * 100, 2)
-    
-    # Pullback quality score
-    if -2 >= pct_from_high >= -7:
-        quality = "🟢 Ideal"  # Sweet spot
-    elif -8 >= pct_from_high >= -12:
-        quality = "🟡 Deep"  # Acceptable
-    elif pct_from_high > -2:
-        quality = "🔴 Extended"  # Too high, wait
-    else:
-        quality = "⚪ Extreme"  # Too deep
-    
-    return {
-        'pct_from_high': pct_from_high,
-        'pullback_quality': quality
-    }
-
-def calculate_entry_score(df, rsi_d, vol_ratio, stage, pullback_pct):
-    """
-    Entry timing score: 0-100
-    Higher = better entry setup RIGHT NOW
-    """
-    score = 0
-    
-    # 1. Stage (30 points) - Most important
-    if stage == "Stage 2 🚀":
-        score += 30
-    elif stage == "Stage 1 📊":
-        score += 15
-    
-    # 2. RSI sweet spot (25 points)
-    if rsi_d:
-        if 40 <= rsi_d <= 60:
-            score += 25
-        elif 35 <= rsi_d < 40 or 60 < rsi_d <= 65:
-            score += 15
-    
-    # 3. Pullback depth (25 points)
-    if pullback_pct:
-        if -7 <= pullback_pct <= -2:
-            score += 25
-        elif -12 <= pullback_pct < -7:
-            score += 15
-    
-    # 4. Volume confirmation (20 points)
-    if vol_ratio:
-        if vol_ratio >= 1.5:
-            score += 20
-        elif vol_ratio >= 1.2:
-            score += 10
-    
-    return min(score, 100)  # Cap at 100
-
-# ─────────────────────────────────────────────────────────────
-# RS SCAN - ENHANCED FOR SWING TRADING
-# ─────────────────────────────────────────────────────────────
-# ─────────────────────────────────────────────────────────────
-# RS SCAN - FIXED BENCHMARK SELECTION
+# RS SCAN - WITH TRADING STYLE SUPPORT
 # ─────────────────────────────────────────────────────────────
 def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode, trading_style):
-    """Main RS scanning logic with swing trading enhancements"""
+    """Main RS scanning logic with trading style support"""
     
     # Load instrument maps
     instrument_map = load_kite_instrument_map(kite)
     st.session_state.instrument_map = instrument_map
+    
+    # Determine lookback based on trading style
+    if trading_style == "Swing (3M Focus)":
+        benchmark_lookback = RS_LOOKBACK_3M
+        rs_column = "RS_3M"
+        lookback_label = "3M"
+    else:  # Position (6M Focus) or Hybrid
+        benchmark_lookback = RS_LOOKBACK_6M
+        rs_column = "RS_6M"
+        lookback_label = "6M"
     
     # Fetch benchmarks
     with st.spinner("📊 Fetching benchmark indices..."):
@@ -600,23 +464,7 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode, trading_st
             max_workers=5
         )
 
-    # ═══════════════════════════════════════════════════════════
-    # FIXED: Determine lookback based on trading style
-    # ═══════════════════════════════════════════════════════════
-    if trading_style == "Swing (3M Focus)":
-        benchmark_lookback = RS_LOOKBACK_3M  # 63 days
-        primary_rs = "RS_3M"
-        rs_column = "RS_3M"
-        lookback_label = "3M"
-    else:  # Position or Hybrid
-        benchmark_lookback = RS_LOOKBACK_6M  # 126 days
-        primary_rs = "RS_6M"
-        rs_column = "RS_6M"
-        lookback_label = "6M"
-
-    # ═══════════════════════════════════════════════════════════
-    # FIXED: Select benchmark using matching timeframe
-    # ═══════════════════════════════════════════════════════════
+    # Select best benchmark using matching timeframe
     best_ret = -1e9
     selected_df = None
     selected_benchmark = None
@@ -628,12 +476,11 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode, trading_st
         if df is None or df.empty or len(df) < min_required_days:
             continue
         
-        # Check if we have enough data for the selected lookback
         if len(df) < benchmark_lookback:
             continue
 
         try:
-            # FIXED: Use matching lookback for benchmark selection
+            # Use matching lookback for benchmark selection
             ret = df["Close"].iloc[-1] / df["Close"].iloc[-benchmark_lookback] - 1
             
             benchmark_rows.append({
@@ -654,7 +501,6 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode, trading_st
         st.error("❌ No valid benchmark found.")
         return pd.DataFrame(), None, pd.DataFrame()
 
-    # Show which timeframe was used for benchmark selection
     st.info(f"✅ Selected {selected_benchmark} based on {lookback_label} performance ({best_ret*100:.2f}%)")
 
     # Scan stocks
@@ -664,7 +510,6 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode, trading_st
         "short_history": 0,
         "below_dma200": 0,
         "low_liquidity": 0,
-        "stage_4": 0,
         "passed": 0
     }
 
@@ -692,14 +537,8 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode, trading_st
                 filter_stats["low_liquidity"] += 1
                 continue
 
-            # Stage analysis - skip Stage 4
-            stage = calculate_stage(df)
-            if stage == "Stage 4 ⚠️":
-                filter_stats["stage_4"] += 1
-                continue
-
             try:
-                # Calculate BOTH RS metrics (we always show both)
+                # Calculate both RS metrics (always show both)
                 rs6 = log_rs(price, close.iloc[-RS_LOOKBACK_6M],
                              selected_df["Close"].iloc[-1],
                              selected_df["Close"].iloc[-RS_LOOKBACK_6M])
@@ -712,25 +551,17 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode, trading_st
             except Exception:
                 continue
             
-            # Calculate all indicators
+            # Calculate RSI at multiple timeframes
             rsi_d = compute_rsi(close)
+            
             weekly_close = resample_to_weekly(close)
             rsi_w = compute_rsi(weekly_close) if weekly_close is not None else None
+            
             monthly_close = resample_to_monthly(close)
             rsi_m = compute_rsi(monthly_close) if monthly_close is not None else None
             
+            # Calculate volume metrics
             vol_metrics = calculate_volume_metrics(df)
-            atr_metrics = calculate_atr_stops(df)
-            pullback_metrics = calculate_pullback_metrics(df)
-            
-            # Entry score
-            entry_score = calculate_entry_score(
-                df, 
-                rsi_d, 
-                vol_metrics['vol_ratio'],
-                stage,
-                pullback_metrics['pct_from_high']
-            )
 
             clean = sym.replace(".NS", "")
             tv = f"https://tradingview.com/chart/?symbol=NSE%3A{clean}"
@@ -739,23 +570,18 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode, trading_st
                 "Symbol": clean,
                 "Name": name_map.get(clean, ""),
                 "Price": round(price, 2),
+                "RS": round(rs6, 3),
                 "RS_3M": round(rs3, 3),
                 "RS_6M": round(rs6, 3),
                 "RS_Delta": round(rs_delta, 3),
-                "Stage": stage,
-                "Entry_Score": entry_score,
+                "LiquidityCr": round(liq, 1),
                 "RSI_D": rsi_d,
                 "RSI_W": rsi_w,
                 "RSI_M": rsi_m,
-                "Pullback": pullback_metrics['pullback_quality'],
-                "Pullback_%": pullback_metrics['pct_from_high'],
                 "Vol_Ratio": vol_metrics['vol_ratio'],
+                "Vol_Spike": vol_metrics['vol_spike'],
+                "Vol_Trend": vol_metrics['vol_trend'],
                 "Vol_Breakout": "🔥" if vol_metrics['vol_breakout'] else "",
-                "ATR": atr_metrics['atr'],
-                "Stop": atr_metrics['stop'],
-                "Target": atr_metrics['target'],
-                "Risk_%": atr_metrics['risk_pct'],
-                "LiquidityCr": round(liq, 1),
                 "Chart": tv
             })
             filter_stats["passed"] += 1
@@ -769,7 +595,7 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode, trading_st
                 st.write(f"**{key}:** {val}")
         return df, selected_benchmark, pd.DataFrame(benchmark_rows) if benchmark_rows else pd.DataFrame()
     
-    # FIXED: Calculate RS rank based on trading style (using matching timeframe)
+    # Calculate RS rank based on selected timeframe
     df["RS_Rank"] = df[rs_column].rank(pct=True) * 100
     
     df["Momentum"] = np.where(
@@ -777,30 +603,23 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode, trading_st
         np.where(df["RS_Delta"] < 0, "📉 Decelerating", "➡️ Stable")
     )
     
-    # FIXED: Sort benchmark table by the matching timeframe column
     bm_table = pd.DataFrame(benchmark_rows).sort_values(f"Return_{lookback_label}", ascending=False) if benchmark_rows else pd.DataFrame()
 
     # Summary stats
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 📊 Scan Results")
-    st.sidebar.metric("Trading Style", trading_style)
-    st.sidebar.metric("Timeframe", lookback_label)
+    st.sidebar.metric("Trading Style", lookback_label)
     st.sidebar.metric("Total Scanned", filter_stats["total"])
-    st.sidebar.metric("Stage 4 Filtered", filter_stats["stage_4"])
     st.sidebar.metric("Passed All Filters", filter_stats["passed"])
     st.sidebar.metric(f"RS Rank ≥ {min_rs}%", len(df[df["RS_Rank"] >= min_rs]))
     
-    # Trading opportunity metrics
-    stage2_count = len(df[df["Stage"] == "Stage 2 🚀"])
-    high_entry_score = len(df[df["Entry_Score"] >= 70])
-    
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("### 🎯 Trading Setups")
-    st.sidebar.metric("Stage 2 Stocks", stage2_count)
-    st.sidebar.metric("Entry Score ≥70", high_entry_score)
+    # Volume breakout count
+    vol_breakouts = len(df[df["Vol_Breakout"] == "🔥"])
+    if vol_breakouts > 0:
+        st.sidebar.metric("🔥 Volume Breakouts", vol_breakouts)
 
     return (
-        df[df["RS_Rank"] >= min_rs].sort_values("Entry_Score", ascending=False),
+        df[df["RS_Rank"] >= min_rs].sort_values("RS_Rank", ascending=False),
         selected_benchmark,
         bm_table
     )
@@ -813,7 +632,7 @@ def main():
     <div style='background: linear-gradient(135deg,#667eea,#764ba2,#f093fb);
                 padding:1.2rem;border-radius:14px;color:white;text-align:center'>
         <h2 style='margin:0'>🏆 NSE RS Leaders Scanner PRO</h2>
-        <p style='margin:0;font-size:0.9rem'>Swing Trading Edition • Stage Analysis • Entry Timing</p>
+        <p style='margin:0;font-size:0.9rem'>Relative Strength • Volume Analysis • Multi-Timeframe RSI</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -827,8 +646,8 @@ def main():
     # Trading style selector
     trading_style = st.sidebar.radio(
         "Trading Style",
-        ["Hybrid (Recommended)", "Swing (3M Focus)", "Position (6M Focus)"],
-        help="Hybrid: Best balance | Swing: More responsive | Position: More stable"
+        ["Hybrid (6M)", "Swing (3M Focus)", "Position (6M Focus)"],
+        help="Swing: 3M lookback (more responsive) | Position: 6M lookback (more stable) | Hybrid: 6M default"
     )
     
     universe = st.sidebar.radio(
@@ -872,14 +691,15 @@ def main():
             
             with col2:
                 if not bm_table.empty:
-                    # Determine which column to show based on trading style
+                    # Determine which column to show
                     if trading_style == "Swing (3M Focus)":
                         perf_col = "Return_3M"
+                        timeframe = "3M"
                     else:
                         perf_col = "Return_6M"
+                        timeframe = "6M"
                     
                     best_perf = bm_table.iloc[0][perf_col]
-                    timeframe = "3M" if trading_style == "Swing (3M Focus)" else "6M"
                     st.metric(f"{timeframe} Return", f"{best_perf}%")
 
             if not bm_table.empty:
@@ -887,202 +707,127 @@ def main():
                     st.dataframe(bm_table, hide_index=True, use_container_width=True)
 
             st.markdown("---")
-            
-            # Filter tabs
-            tab1, tab2, tab3 = st.tabs(["🎯 Best Setups", "📊 All Results", "🔥 Volume Breakouts"])
-            
-            with tab1:
-                st.markdown("### 🎯 Prime Entry Setups (Entry Score ≥ 70)")
-                best_setups = df[df["Entry_Score"] >= 70].sort_values("Entry_Score", ascending=False)
-                
-                if len(best_setups) > 0:
-                    display_results_table(best_setups, min_rs)
-                else:
-                    st.info("No stocks with Entry Score ≥ 70. Check 'All Results' tab.")
-            
-            with tab2:
-                st.markdown(f"### 📊 All Stocks (RS Rank ≥ {min_rs}%)")
-                display_results_table(df, min_rs)
-            
-            with tab3:
-                st.markdown("### 🔥 Volume Breakout Candidates")
-                vol_breakouts = df[df["Vol_Breakout"] == "🔥"].sort_values("Entry_Score", ascending=False)
-                
-                if len(vol_breakouts) > 0:
-                    display_results_table(vol_breakouts, min_rs)
-                else:
-                    st.info("No volume breakouts detected.")
+            st.markdown(f"### 🎯 Top RS Leaders (≥ {min_rs}%)")
 
-            # Download
+            def rsi_color(v):
+                if pd.isna(v): return ""
+                if v >= 60: return "background-color:#d4edda;color:#155724"
+                if v <= 40: return "background-color:#f8d7da;color:#721c24"
+                return ""
+            
+            def vol_ratio_color(v):
+                if pd.isna(v): return ""
+                if v >= 2.5: return "background-color:#fff3cd;color:#856404;font-weight:bold"
+                if v >= 1.5: return "background-color:#d1ecf1;color:#0c5460"
+                return ""
+
+            styled = df.style.format({
+                "Price": "₹{:.2f}",
+                "RS": "{:.3f}",
+                "RS_6M": "{:.3f}",
+                "RS_3M": "{:.3f}",
+                "RS_Delta": "{:+.3f}",
+                "LiquidityCr": "₹{:.1f}Cr",
+                "RSI_D": lambda x: f"{x:.1f}" if pd.notna(x) else "-",
+                "RSI_W": lambda x: f"{x:.1f}" if pd.notna(x) else "-",
+                "RSI_M": lambda x: f"{x:.1f}" if pd.notna(x) else "-",
+                "Vol_Ratio": lambda x: f"{x:.2f}x" if pd.notna(x) else "-",
+                "Vol_Spike": lambda x: f"{x:.2f}x" if pd.notna(x) else "-",
+                "RS_Rank": "{:.1f}%"
+            }).background_gradient(
+                subset=["RS_Rank"], 
+                cmap="RdYlGn",
+                vmin=min_rs,
+                vmax=100
+            ).map(rsi_color, subset=["RSI_D", "RSI_W", "RSI_M"]
+            ).map(vol_ratio_color, subset=["Vol_Ratio"])
+
+            st.dataframe(
+                styled,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Chart": st.column_config.LinkColumn("Chart", display_text="📈 View"),
+                    "Momentum": st.column_config.TextColumn("Momentum", help="RS 3M vs 6M"),
+                    "Vol_Ratio": st.column_config.TextColumn("Vol Ratio", help="Today vs 20D avg"),
+                    "Vol_Spike": st.column_config.TextColumn("Vol Spike", help="Recent 5D vs prev 20D"),
+                    "Vol_Trend": st.column_config.TextColumn("Vol Trend", help="20D volume MA trend"),
+                    "Vol_Breakout": st.column_config.TextColumn("🔥", help="Vol breakout signal")
+                },
+                height=600
+            )
+
             csv = df.to_csv(index=False).encode("utf-8")
             timestamp = datetime.now().strftime("%Y%m%d_%H%M")
             st.download_button(
-                "📥 Download Full Results CSV",
+                "📥 Download CSV",
                 csv,
-                f"RS_Leaders_Swing_{timestamp}.csv",
+                f"RS_Leaders_{timestamp}.csv",
                 mime="text/csv",
                 use_container_width=True
             )
 
-            # Key metrics
             st.markdown("---")
-            st.markdown("### 💡 Market Overview")
+            st.markdown("### 💡 Key Metrics")
             
             col1, col2, col3, col4, col5 = st.columns(5)
             
             with col1:
-                stage2 = len(df[df["Stage"] == "Stage 2 🚀"])
-                st.metric("Stage 2 Stocks", f"{stage2}/{len(df)}")
+                st.metric("Avg RS Rank", f"{df['RS_Rank'].mean():.1f}%")
             
             with col2:
-                accelerating = len(df[df["RS_Delta"] > 0])
-                st.metric("Accelerating", f"{accelerating}/{len(df)}")
+                improving = len(df[df["RS_Delta"] > 0])
+                st.metric("Accelerating", f"{improving}/{len(df)}")
             
             with col3:
-                ideal_pullback = len(df[df["Pullback"] == "🟢 Ideal"])
-                st.metric("Ideal Pullback", f"{ideal_pullback}")
+                overbought = len(df[df["RSI_D"] > 70])
+                st.metric("Overbought", f"{overbought}")
             
             with col4:
-                high_entry = len(df[df["Entry_Score"] >= 70])
-                st.metric("Entry Score ≥70", f"{high_entry}")
+                vol_breakouts = len(df[df["Vol_Breakout"] == "🔥"])
+                st.metric("🔥 Vol Breakout", f"{vol_breakouts}")
             
             with col5:
-                avg_risk = df["Risk_%"].mean()
-                st.metric("Avg Risk", f"{avg_risk:.1f}%")
+                high_vol = len(df[df["Vol_Ratio"] >= 2.0])
+                st.metric("Vol >2x", f"{high_vol}")
 
         else:
             st.warning("⚠️ No stocks passed filters. Try relaxing criteria.")
 
-    with st.expander("ℹ️ How to Use This Scanner"):
+    with st.expander("ℹ️ How It Works"):
         st.markdown("""
-        ## 🎯 Swing Trading Workflow
+        **Trading Style:**
+        - **Swing (3M Focus)**: More responsive, uses 3-month lookback for both benchmark selection and stock ranking
+        - **Position (6M Focus)**: More stable, uses 6-month lookback for both benchmark selection and stock ranking
+        - **Hybrid (6M)**: Default 6-month approach
         
-        **1. Filter for Best Setups:**
-        - Focus on "Best Setups" tab (Entry Score ≥ 70)
-        - Look for Stage 2 🚀 stocks only
-        - Prefer 🟢 Ideal or 🟡 Deep pullbacks
+        **RS Strategy:**
+        1. Selects best-performing benchmark based on selected timeframe
+        2. Calculates log-based Relative Strength vs benchmark (matching timeframe)
+        3. Filters: Above 200 DMA, Min liquidity ₹5Cr
+        4. Ranks by RS percentile (0-100%)
         
-        **2. Entry Criteria:**
-        - Entry Score ≥ 70 (higher = better timing)
-        - Stage 2 🚀 only
-        - RS Delta > 0 (accelerating momentum)
-        - RSI 40-65 range
-        - Pullback -2% to -7% from recent high
+        **Volume Analysis:**
+        - **Vol Ratio**: Today's volume vs 20-day average (>2x = significant)
+        - **Vol Spike**: Recent 5-day avg vs previous 20-day avg
+        - **Vol Trend**: Direction of 20-day volume moving average
+        - **🔥 Vol Breakout**: High volume (>2x) + price near 52-week high
         
-        **3. Risk Management:**
-        - Use provided ATR Stop level
-        - Position size based on Risk_%
-        - Target is 2:1 reward/risk minimum
+        **RSI Levels:**
+        - 🟢 Green (≥60): Overbought zone
+        - 🔴 Red (≤40): Oversold zone
         
-        **4. Indicators Explained:**
+        **Volume Colors:**
+        - 🟡 Yellow (≥2.5x): Extreme volume spike
+        - 🔵 Blue (≥1.5x): Elevated volume
         
-        **Stage Analysis:**
-        - Stage 2 🚀: BEST - uptrend established
-        - Stage 1 📊: Basing - potential setup
-        - Stage 3/4 ⚠️: AVOID - topping/declining
-        
-        **Entry Score (0-100):**
-        - 80-100: Excellent setup
-        - 70-79: Good setup
-        - 60-69: Average
-        - <60: Wait for better setup
-        
-        **Pullback Quality:**
-        - 🟢 Ideal: -2% to -7% (sweet spot)
-        - 🟡 Deep: -8% to -12% (acceptable)
-        - 🔴 Extended: Too close to high
-        - ⚪ Extreme: Too deep
-        
-        **Volume:**
-        - Vol Ratio >1.5x = Strong interest
-        - 🔥 = Breakout signal (2x volume + near high)
-        
-        **RS Metrics:**
-        - RS Rank: 85-100 = Top performers
-        - RS Delta > 0: Momentum accelerating
-        - RS Delta < 0: Momentum slowing
-        
-        ## 🎓 Best Practices
-        
-        1. **Don't chase**: Wait for pullbacks (🟢 or 🟡)
-        2. **Confirm stage**: Only trade Stage 2 🚀
-        3. **Use stops**: Always use ATR-based stops
-        4. **Size properly**: Risk 1-2% per trade based on Risk_%
-        5. **Check chart**: Use TradingView link for final confirmation
-        
-        ## ⚠️ What to Avoid
-        
-        - Stage 4 stocks (filtered automatically)
-        - Extended pullbacks (🔴)
-        - RSI > 70 on all timeframes
-        - Low Entry Score (<60)
-        - Negative RS Delta (decelerating)
+        **Best Practices:**
+        - Focus on RS Rank >85% + 🔥 breakout + accelerating momentum
+        - High volume + strong RS = potential breakout candidates
+        - Avoid RSI >70 across all timeframes (overextended)
+        - For swing trading, use "Swing (3M Focus)" for more responsive signals
+        - For position trading, use "Position (6M Focus)" for more stable trends
         """)
-
-def display_results_table(df, min_rs):
-    """Display results table with proper formatting"""
-    
-    def rsi_color(v):
-        if pd.isna(v): return ""
-        if v >= 60: return "background-color:#d4edda;color:#155724"
-        if v <= 40: return "background-color:#f8d7da;color:#721c24"
-        return ""
-    
-    def entry_score_color(v):
-        if pd.isna(v): return ""
-        if v >= 80: return "background-color:#d4edda;color:#155724;font-weight:bold"
-        if v >= 70: return "background-color:#d1ecf1;color:#0c5460"
-        if v >= 60: return "background-color:#fff3cd;color:#856404"
-        return ""
-    
-    def stage_color(v):
-        if "Stage 2" in str(v): return "background-color:#d4edda;color:#155724;font-weight:bold"
-        if "Stage 1" in str(v): return "background-color:#d1ecf1;color:#0c5460"
-        if "Stage 4" in str(v) or "Stage 3" in str(v): return "background-color:#f8d7da;color:#721c24"
-        return ""
-
-    styled = df.style.format({
-        "Price": "₹{:.2f}",
-        "RS_3M": "{:.3f}",
-        "RS_6M": "{:.3f}",
-        "RS_Delta": "{:+.3f}",
-        "Entry_Score": "{:.0f}",
-        "RSI_D": lambda x: f"{x:.1f}" if pd.notna(x) else "-",
-        "RSI_W": lambda x: f"{x:.1f}" if pd.notna(x) else "-",
-        "RSI_M": lambda x: f"{x:.1f}" if pd.notna(x) else "-",
-        "Pullback_%": lambda x: f"{x:+.1f}%" if pd.notna(x) else "-",
-        "Vol_Ratio": lambda x: f"{x:.2f}x" if pd.notna(x) else "-",
-        "ATR": lambda x: f"₹{x:.2f}" if pd.notna(x) else "-",
-        "Stop": lambda x: f"₹{x:.2f}" if pd.notna(x) else "-",
-        "Target": lambda x: f"₹{x:.2f}" if pd.notna(x) else "-",
-        "Risk_%": lambda x: f"{x:.2f}%" if pd.notna(x) else "-",
-        "LiquidityCr": "₹{:.1f}Cr",
-        "RS_Rank": "{:.1f}%"
-    }).background_gradient(
-        subset=["RS_Rank"], 
-        cmap="RdYlGn",
-        vmin=min_rs,
-        vmax=100
-    ).map(rsi_color, subset=["RSI_D", "RSI_W", "RSI_M"]
-    ).map(entry_score_color, subset=["Entry_Score"]
-    ).map(stage_color, subset=["Stage"])
-
-    st.dataframe(
-        styled,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "Chart": st.column_config.LinkColumn("Chart", display_text="📈 View"),
-            "Momentum": st.column_config.TextColumn("Momentum", help="RS 3M vs 6M"),
-            "Stage": st.column_config.TextColumn("Stage", help="Weinstein stage"),
-            "Entry_Score": st.column_config.NumberColumn("Entry", help="Entry timing score 0-100"),
-            "Pullback": st.column_config.TextColumn("Pullback", help="Pullback quality"),
-            "Vol_Breakout": st.column_config.TextColumn("🔥", help="Volume breakout"),
-            "Stop": st.column_config.NumberColumn("Stop", help="1.5 ATR stop"),
-            "Target": st.column_config.NumberColumn("Target", help="3 ATR target"),
-        },
-        height=600
-    )
 
 if __name__ == "__main__":
     main()
