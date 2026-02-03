@@ -32,6 +32,100 @@ BENCHMARK_CANDIDATES = {
 }
 
 # ─────────────────────────────────────────────────────────────
+# KITE CONNECT OAUTH AUTHENTICATION
+# ─────────────────────────────────────────────────────────────
+
+def get_kite_instance():
+    """
+    Initialize Kite Connect with OAuth login flow
+    Only API Key needs to be in secrets - no access token needed!
+    """
+    
+    # Check if already authenticated in session
+    if 'kite' in st.session_state and 'access_token' in st.session_state:
+        return st.session_state.kite
+    
+    # Get API credentials from secrets (only API key and secret needed)
+    try:
+        api_key = st.secrets["KITE_API_KEY"]
+        api_secret = st.secrets["KITE_API_SECRET"]  # Add this to secrets
+    except Exception as e:
+        st.sidebar.error("❌ Add KITE_API_KEY and KITE_API_SECRET to Streamlit secrets")
+        st.stop()
+        return None
+    
+    # Initialize Kite Connect
+    kite = KiteConnect(api_key=api_key)
+    
+    # Check if we have a request token from callback URL
+    query_params = st.query_params
+    
+    if 'request_token' in query_params:
+        # Step 3: Exchange request token for access token
+        request_token = query_params['request_token']
+        
+        try:
+            # Generate session
+            data = kite.generate_session(request_token, api_secret=api_secret)
+            access_token = data["access_token"]
+            
+            # Store in session state
+            st.session_state.access_token = access_token
+            kite.set_access_token(access_token)
+            st.session_state.kite = kite
+            
+            # Get user profile
+            profile = kite.profile()
+            st.session_state.user_name = profile.get('user_name', 'User')
+            st.session_state.user_id = profile.get('user_id', '')
+            
+            # Clear query params
+            st.query_params.clear()
+            
+            st.sidebar.success(f"✅ Logged in as {st.session_state.user_name}")
+            st.rerun()
+            
+        except Exception as e:
+            st.sidebar.error(f"❌ Login failed: {str(e)[:100]}")
+            st.query_params.clear()
+            return None
+    
+    elif 'access_token' not in st.session_state:
+        # Step 1: Show login button
+        st.sidebar.markdown("### 🔐 Kite Connect Login")
+        st.sidebar.info("Click below to login with your Zerodha account")
+        
+        # Generate login URL
+        login_url = kite.login_url()
+        
+        # Show login button
+        st.sidebar.markdown(
+            f'<a href="{login_url}" target="_self">'
+            f'<button style="background:#387ed1;color:white;padding:0.5rem 1rem;'
+            f'border:none;border-radius:4px;cursor:pointer;width:100%;font-size:1rem;">'
+            f'🚀 Login with Kite</button></a>',
+            unsafe_allow_html=True
+        )
+        
+        st.info("👈 Please login with Kite Connect in the sidebar to continue")
+        st.stop()
+        return None
+    
+    return st.session_state.kite
+
+def logout_kite():
+    """Logout and clear session"""
+    if 'access_token' in st.session_state:
+        del st.session_state.access_token
+    if 'kite' in st.session_state:
+        del st.session_state.kite
+    if 'user_name' in st.session_state:
+        del st.session_state.user_name
+    if 'user_id' in st.session_state:
+        del st.session_state.user_id
+    st.rerun()
+
+# ─────────────────────────────────────────────────────────────
 # RATE LIMITER
 # ─────────────────────────────────────────────────────────────
 class RateLimiter:
@@ -57,31 +151,6 @@ class RateLimiter:
             
             return func(*args, **kwargs)
         return wrapper
-
-# ─────────────────────────────────────────────────────────────
-# CLOUD SECRETS AUTH
-# ─────────────────────────────────────────────────────────────
-def get_kite_from_secrets():
-    """Get pre-configured Kite from Streamlit secrets"""
-    try:
-        api_key = st.secrets["KITE_API_KEY"]
-        access_token = st.secrets["KITE_ACCESS_TOKEN"]
-        
-        kite = KiteConnect(api_key=api_key)
-        kite.set_access_token(access_token)
-        
-        profile = kite.profile()
-        st.sidebar.success(f"✅ Connected: {profile['user_name']}")
-        return kite
-        
-    except Exception as e:
-        st.sidebar.error(f"❌ Auth failed: {str(e)[:50]}")
-        return None
-
-def get_kite():
-    if "kite" in st.session_state:
-        return st.session_state.kite
-    return None
 
 # ─────────────────────────────────────────────────────────────
 # INSTRUMENT MAP
@@ -384,17 +453,14 @@ def calculate_volume_metrics(df):
     
     volume = df["Volume"]
     
-    # Volume ratio: Today's volume vs 20-day average
     vol_20d_avg = volume.rolling(20).mean().iloc[-1]
     vol_today = volume.iloc[-1]
     vol_ratio = round(vol_today / vol_20d_avg, 2) if vol_20d_avg > 0 else None
     
-    # Volume spike: Compare last 5 days avg vs previous 20 days avg
     vol_recent_5d = volume.tail(5).mean()
     vol_prev_20d = volume.iloc[-25:-5].mean() if len(volume) >= 25 else vol_20d_avg
     vol_spike = round(vol_recent_5d / vol_prev_20d, 2) if vol_prev_20d > 0 else None
     
-    # Volume trend
     if len(volume) >= 40:
         vol_ma = volume.rolling(20).mean()
         vol_ma_recent = vol_ma.tail(20)
@@ -402,7 +468,6 @@ def calculate_volume_metrics(df):
     else:
         vol_trend = "➡️"
     
-    # Volume breakout
     close = df["Close"]
     high_52w = close.tail(252).max() if len(close) >= 252 else close.max()
     price_pct_from_high = (close.iloc[-1] / high_52w - 1) * 100
@@ -422,21 +487,18 @@ def calculate_volume_metrics(df):
 def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode, trading_style):
     """Main RS scanning logic with trading style support"""
     
-    # Load instrument maps
     instrument_map = load_kite_instrument_map(kite)
     st.session_state.instrument_map = instrument_map
     
-    # Determine lookback based on trading style
     if trading_style == "Swing (3M Focus)":
         benchmark_lookback = RS_LOOKBACK_3M
         rs_column = "RS_3M"
         lookback_label = "3M"
-    else:  # Position (6M Focus) or Hybrid
+    else:
         benchmark_lookback = RS_LOOKBACK_6M
         rs_column = "RS_6M"
         lookback_label = "6M"
     
-    # Fetch benchmarks
     with st.spinner("📊 Fetching benchmark indices..."):
         bm_data = fetch_benchmarks_sequential(kite, instrument_map)
     
@@ -444,7 +506,6 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode, trading_st
         st.error("❌ Failed to fetch benchmark data.")
         st.stop()
     
-    # Pre-filter
     with st.spinner("🔍 Pre-filtering universe..."):
         filtered_symbols = prefilter_universe(kite, symbols, instrument_map, min_liq)
     
@@ -455,7 +516,6 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode, trading_st
         st.error("❌ No stocks passed pre-filtering.")
         return pd.DataFrame(), None, pd.DataFrame()
 
-    # Parallel fetch
     with st.spinner(f"📥 Fetching historical data..."):
         stock_data = fetch_in_batches_parallel(
             kite, 
@@ -464,7 +524,6 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode, trading_st
             max_workers=5
         )
 
-    # Select best benchmark using matching timeframe
     best_ret = -1e9
     selected_df = None
     selected_benchmark = None
@@ -480,7 +539,6 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode, trading_st
             continue
 
         try:
-            # Use matching lookback for benchmark selection
             ret = df["Close"].iloc[-1] / df["Close"].iloc[-benchmark_lookback] - 1
             
             benchmark_rows.append({
@@ -501,9 +559,6 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode, trading_st
         st.error("❌ No valid benchmark found.")
         return pd.DataFrame(), None, pd.DataFrame()
 
-    # st.info(f"✅ Selected {selected_benchmark} based on {lookback_label} performance ({best_ret*100:.2f}%)")
-
-    # Scan stocks
     results = []
     filter_stats = {
         "total": len(stock_data),
@@ -538,7 +593,6 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode, trading_st
                 continue
 
             try:
-                # Calculate both RS metrics (always show both)
                 rs6 = log_rs(price, close.iloc[-RS_LOOKBACK_6M],
                              selected_df["Close"].iloc[-1],
                              selected_df["Close"].iloc[-RS_LOOKBACK_6M])
@@ -551,16 +605,12 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode, trading_st
             except Exception:
                 continue
             
-            # Calculate RSI at multiple timeframes
             rsi_d = compute_rsi(close)
-            
             weekly_close = resample_to_weekly(close)
             rsi_w = compute_rsi(weekly_close) if weekly_close is not None else None
-            
             monthly_close = resample_to_monthly(close)
             rsi_m = compute_rsi(monthly_close) if monthly_close is not None else None
             
-            # Calculate volume metrics
             vol_metrics = calculate_volume_metrics(df)
 
             clean = sym.replace(".NS", "")
@@ -595,7 +645,6 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode, trading_st
                 st.write(f"**{key}:** {val}")
         return df, selected_benchmark, pd.DataFrame(benchmark_rows) if benchmark_rows else pd.DataFrame()
     
-    # Calculate RS rank based on selected timeframe
     df["RS_Rank"] = df[rs_column].rank(pct=True) * 100
     
     df["Momentum"] = np.where(
@@ -605,7 +654,6 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode, trading_st
     
     bm_table = pd.DataFrame(benchmark_rows).sort_values(f"Return_{lookback_label}", ascending=False) if benchmark_rows else pd.DataFrame()
 
-    # Summary stats
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 📊 Scan Results")
     st.sidebar.metric("Trading Style", lookback_label)
@@ -613,7 +661,6 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode, trading_st
     st.sidebar.metric("Passed All Filters", filter_stats["passed"])
     st.sidebar.metric(f"RS Rank ≥ {min_rs}%", len(df[df["RS_Rank"] >= min_rs]))
     
-    # Volume breakout count
     vol_breakouts = len(df[df["Vol_Breakout"] == "🔥"])
     if vol_breakouts > 0:
         st.sidebar.metric("🔥 Volume Breakouts", vol_breakouts)
@@ -636,18 +683,24 @@ def main():
     </div>
     """, unsafe_allow_html=True)
 
-    kite = get_kite_from_secrets()
+    # Kite OAuth Login
+    kite = get_kite_instance()
     if not kite:
-        st.error("⚠️ Update KITE_ACCESS_TOKEN in Streamlit Cloud settings")
-        st.stop()
+        return
+
+    # Show user info and logout button in sidebar
+    if 'user_name' in st.session_state:
+        st.sidebar.markdown("---")
+        st.sidebar.markdown(f"**👤 {st.session_state.user_name}**")
+        if st.sidebar.button("🚪 Logout", use_container_width=True):
+            logout_kite()
 
     st.sidebar.markdown("### ⚙️ Configuration")
     
-    # Trading style selector
     trading_style = st.sidebar.radio(
         "Trading Style",
         ["Hybrid (6M)", "Swing (3M Focus)", "Position (6M Focus)"],
-        help="Swing: 3M lookback (more responsive) | Position: 6M lookback (more stable) | Hybrid: 6M default"
+        help="Swing: 3M lookback | Position: 6M lookback"
     )
     
     universe = st.sidebar.radio(
@@ -681,8 +734,6 @@ def main():
         scan_duration = time.time() - scan_start
 
         if len(df) > 0:
-            # st.success(f"✅ Found **{len(df)} stocks** in {scan_duration:.0f}s")
-            # st.markdown("---")
             col1, col2 = st.columns([3, 1])
             
             with col1:
@@ -690,7 +741,6 @@ def main():
             
             with col2:
                 if not bm_table.empty:
-                    # Determine which column to show
                     if trading_style == "Swing (3M Focus)":
                         perf_col = "Return_3M"
                         timeframe = "3M"
@@ -705,7 +755,6 @@ def main():
                 with st.expander("📈 All Benchmark Returns"):
                     st.dataframe(bm_table, hide_index=True, use_container_width=True)
 
-            # st.markdown("---")
             st.markdown(f"### 🎯 Top RS Leaders (≥ {min_rs}%) :green[Found **{len(df)} stocks** in {scan_duration:.0f}s]")
 
             def rsi_color(v):
@@ -766,7 +815,6 @@ def main():
                 use_container_width=True
             )
 
-            # st.markdown("---")
             st.markdown("### 💡 Key Metrics")
             
             col1, col2, col3, col4, col5 = st.columns(5)
@@ -796,36 +844,16 @@ def main():
     with st.expander("ℹ️ How It Works"):
         st.markdown("""
         **Trading Style:**
-        - **Swing (3M Focus)**: More responsive, uses 3-month lookback for both benchmark selection and stock ranking
-        - **Position (6M Focus)**: More stable, uses 6-month lookback for both benchmark selection and stock ranking
+        - **Swing (3M Focus)**: More responsive, 3-month lookback
+        - **Position (6M Focus)**: More stable, 6-month lookback
         - **Hybrid (6M)**: Default 6-month approach
         
-        **RS Strategy:**
-        1. Selects best-performing benchmark based on selected timeframe
-        2. Calculates log-based Relative Strength vs benchmark (matching timeframe)
-        3. Filters: Above 200 DMA, Min liquidity ₹5Cr
-        4. Ranks by RS percentile (0-100%)
-        
         **Volume Analysis:**
-        - **Vol Ratio**: Today's volume vs 20-day average (>2x = significant)
-        - **Vol Spike**: Recent 5-day avg vs previous 20-day avg
-        - **Vol Trend**: Direction of 20-day volume moving average
-        - **🔥 Vol Breakout**: High volume (>2x) + price near 52-week high
+        - **Vol Ratio**: Today vs 20-day average (>2x = significant)
+        - **🔥 Vol Breakout**: High volume + price near 52-week high
         
         **RSI Levels:**
-        - 🟢 Green (≥60): Overbought zone
-        - 🔴 Red (≤40): Oversold zone
-        
-        **Volume Colors:**
-        - 🟡 Yellow (≥2.5x): Extreme volume spike
-        - 🔵 Blue (≥1.5x): Elevated volume
-        
-        **Best Practices:**
-        - Focus on RS Rank >85% + 🔥 breakout + accelerating momentum
-        - High volume + strong RS = potential breakout candidates
-        - Avoid RSI >70 across all timeframes (overextended)
-        - For swing trading, use "Swing (3M Focus)" for more responsive signals
-        - For position trading, use "Position (6M Focus)" for more stable trends
+        - 🟢 Green (≥60): Overbought | 🔴 Red (≤40): Oversold
         """)
 
 if __name__ == "__main__":
