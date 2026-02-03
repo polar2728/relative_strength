@@ -753,7 +753,7 @@ def main():
                     "Vol_Trend": st.column_config.TextColumn("Vol Trend", help="20D volume MA trend"),
                     "Vol_Breakout": st.column_config.TextColumn("🔥", help="Vol breakout signal")
                 },
-                height=600
+                height=420
             )
 
             csv = df.to_csv(index=False).encode("utf-8")
