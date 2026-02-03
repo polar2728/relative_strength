@@ -35,20 +35,24 @@ BENCHMARK_CANDIDATES = {
 # KITE CONNECT OAUTH AUTHENTICATION
 # ─────────────────────────────────────────────────────────────
 
+# ─────────────────────────────────────────────────────────────
+# KITE CONNECT OAUTH AUTHENTICATION - FIXED
+# ─────────────────────────────────────────────────────────────
+
 def get_kite_instance():
     """
     Initialize Kite Connect with OAuth login flow
-    Only API Key needs to be in secrets - no access token needed!
+    FIXED: Prevents redirect loop
     """
     
     # Check if already authenticated in session
     if 'kite' in st.session_state and 'access_token' in st.session_state:
         return st.session_state.kite
     
-    # Get API credentials from secrets (only API key and secret needed)
+    # Get API credentials from secrets
     try:
         api_key = st.secrets["KITE_API_KEY"]
-        api_secret = st.secrets["KITE_API_SECRET"]  # Add this to secrets
+        api_secret = st.secrets["KITE_API_SECRET"]
     except Exception as e:
         st.sidebar.error("❌ Add KITE_API_KEY and KITE_API_SECRET to Streamlit secrets")
         st.stop()
@@ -57,12 +61,18 @@ def get_kite_instance():
     # Initialize Kite Connect
     kite = KiteConnect(api_key=api_key)
     
-    # Check if we have a request token from callback URL
+    # Get query params (Streamlit provides this as a dict-like object)
     query_params = st.query_params
     
+    # Check if we have a request token from callback
     if 'request_token' in query_params:
-        # Step 3: Exchange request token for access token
         request_token = query_params['request_token']
+        
+        # Check if we've already processed this token (prevent re-processing)
+        if st.session_state.get('processed_token') == request_token:
+            # Already processed, just clear params
+            st.query_params.clear()
+            return None
         
         try:
             # Generate session
@@ -71,6 +81,7 @@ def get_kite_instance():
             
             # Store in session state
             st.session_state.access_token = access_token
+            st.session_state.processed_token = request_token  # Mark as processed
             kite.set_access_token(access_token)
             st.session_state.kite = kite
             
@@ -79,31 +90,48 @@ def get_kite_instance():
             st.session_state.user_name = profile.get('user_name', 'User')
             st.session_state.user_id = profile.get('user_id', '')
             
-            # Clear query params
-            st.query_params.clear()
-            
             st.sidebar.success(f"✅ Logged in as {st.session_state.user_name}")
+            
+            # CRITICAL FIX: Clear query params BEFORE rerun
+            st.query_params.clear()
+            time.sleep(0.5)  # Small delay to ensure params are cleared
             st.rerun()
             
         except Exception as e:
             st.sidebar.error(f"❌ Login failed: {str(e)[:100]}")
+            st.session_state.pop('processed_token', None)
             st.query_params.clear()
             return None
     
     elif 'access_token' not in st.session_state:
-        # Step 1: Show login button
+        # Not logged in - show login button
         st.sidebar.markdown("### 🔐 Kite Connect Login")
         st.sidebar.info("Click below to login with your Zerodha account")
         
         # Generate login URL
         login_url = kite.login_url()
         
-        # Show login button
+        # Custom HTML button that opens in same window
         st.sidebar.markdown(
-            f'<a href="{login_url}" target="_self">'
-            f'<button style="background:#387ed1;color:white;padding:0.5rem 1rem;'
-            f'border:none;border-radius:4px;cursor:pointer;width:100%;font-size:1rem;">'
-            f'🚀 Login with Kite</button></a>',
+            f'''
+            <a href="{login_url}" target="_self">
+                <button style="
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    color: white;
+                    padding: 0.6rem 1.2rem;
+                    border: none;
+                    border-radius: 6px;
+                    cursor: pointer;
+                    width: 100%;
+                    font-size: 1rem;
+                    font-weight: 600;
+                    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                    transition: all 0.3s ease;
+                ">
+                    🚀 Login with Kite Connect
+                </button>
+            </a>
+            ''',
             unsafe_allow_html=True
         )
         
@@ -115,16 +143,14 @@ def get_kite_instance():
 
 def logout_kite():
     """Logout and clear session"""
-    if 'access_token' in st.session_state:
-        del st.session_state.access_token
-    if 'kite' in st.session_state:
-        del st.session_state.kite
-    if 'user_name' in st.session_state:
-        del st.session_state.user_name
-    if 'user_id' in st.session_state:
-        del st.session_state.user_id
+    # Clear all session state related to auth
+    keys_to_clear = ['access_token', 'kite', 'user_name', 'user_id', 'processed_token']
+    for key in keys_to_clear:
+        st.session_state.pop(key, None)
+    
+    # Clear query params
+    st.query_params.clear()
     st.rerun()
-
 # ─────────────────────────────────────────────────────────────
 # RATE LIMITER
 # ─────────────────────────────────────────────────────────────
@@ -675,6 +701,12 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode, trading_st
 # MAIN
 # ─────────────────────────────────────────────────────────────
 def main():
+    # DEBUG: Show current state
+    with st.sidebar.expander("🔍 Debug Info"):
+        st.write("Auth State:", st.session_state.get('auth_state', 'none'))
+        st.write("Has Token:", 'access_token' in st.session_state)
+        st.write("Query Params:", dict(st.query_params))
+        
     st.markdown("""
     <div style='background: linear-gradient(135deg,#667eea,#764ba2,#f093fb);
                 padding:1.2rem;border-radius:14px;color:white;text-align:center'>
