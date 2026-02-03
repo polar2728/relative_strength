@@ -38,117 +38,97 @@ BENCHMARK_CANDIDATES = {
 # ─────────────────────────────────────────────────────────────
 # KITE CONNECT OAUTH AUTHENTICATION - FIXED
 # ─────────────────────────────────────────────────────────────
-
 def get_kite_instance():
-    """
-    Initialize Kite Connect with OAuth login flow
-    FIXED: Prevents redirect loop
-    """
+    """OAuth flow with explicit state management"""
     
-    # Check if already authenticated in session
-    if 'kite' in st.session_state and 'access_token' in st.session_state:
-        return st.session_state.kite
-    
-    # Get API credentials from secrets
+    # Get credentials
     try:
         api_key = st.secrets["KITE_API_KEY"]
         api_secret = st.secrets["KITE_API_SECRET"]
     except Exception as e:
-        st.sidebar.error("❌ Add KITE_API_KEY and KITE_API_SECRET to Streamlit secrets")
+        st.sidebar.error("❌ Add KITE_API_KEY and KITE_API_SECRET to secrets")
         st.stop()
         return None
     
-    # Initialize Kite Connect
     kite = KiteConnect(api_key=api_key)
     
-    # Get query params (Streamlit provides this as a dict-like object)
-    query_params = st.query_params
+    # State machine for auth flow
+    auth_state = st.session_state.get('auth_state', 'logged_out')
     
-    # Check if we have a request token from callback
-    if 'request_token' in query_params:
-        request_token = query_params['request_token']
+    if auth_state == 'logged_in' and 'kite' in st.session_state:
+        # Already logged in
+        return st.session_state.kite
+    
+    elif auth_state == 'processing':
+        # Currently processing callback
+        query_params = st.query_params
+        request_token = query_params.get('request_token')
         
-        # Check if we've already processed this token (prevent re-processing)
-        if st.session_state.get('processed_token') == request_token:
-            # Already processed, just clear params
-            st.query_params.clear()
-            return None
+        if request_token:
+            try:
+                # Exchange token
+                data = kite.generate_session(request_token, api_secret=api_secret)
+                access_token = data["access_token"]
+                
+                # Store credentials
+                kite.set_access_token(access_token)
+                st.session_state.kite = kite
+                st.session_state.access_token = access_token
+                
+                # Get profile
+                profile = kite.profile()
+                st.session_state.user_name = profile.get('user_name', 'User')
+                
+                # Update state
+                st.session_state.auth_state = 'logged_in'
+                
+                # Clear URL params
+                st.query_params.clear()
+                
+                st.sidebar.success(f"✅ Logged in as {st.session_state.user_name}")
+                time.sleep(1)
+                st.rerun()
+                
+            except Exception as e:
+                st.sidebar.error(f"❌ Login failed: {str(e)}")
+                st.session_state.auth_state = 'logged_out'
+                st.query_params.clear()
+                time.sleep(1)
+                st.rerun()
         
-        try:
-            # Generate session
-            data = kite.generate_session(request_token, api_secret=api_secret)
-            access_token = data["access_token"]
-            
-            # Store in session state
-            st.session_state.access_token = access_token
-            st.session_state.processed_token = request_token  # Mark as processed
-            kite.set_access_token(access_token)
-            st.session_state.kite = kite
-            
-            # Get user profile
-            profile = kite.profile()
-            st.session_state.user_name = profile.get('user_name', 'User')
-            st.session_state.user_id = profile.get('user_id', '')
-            
-            st.sidebar.success(f"✅ Logged in as {st.session_state.user_name}")
-            
-            # CRITICAL FIX: Clear query params BEFORE rerun
-            st.query_params.clear()
-            time.sleep(0.5)  # Small delay to ensure params are cleared
+        return None
+    
+    else:
+        # Check if returning from Kite
+        query_params = st.query_params
+        
+        if 'request_token' in query_params:
+            # Callback from Kite - set processing state
+            st.session_state.auth_state = 'processing'
             st.rerun()
-            
-        except Exception as e:
-            st.sidebar.error(f"❌ Login failed: {str(e)[:100]}")
-            st.session_state.pop('processed_token', None)
-            st.query_params.clear()
             return None
-    
-    elif 'access_token' not in st.session_state:
-        # Not logged in - show login button
-        st.sidebar.markdown("### 🔐 Kite Connect Login")
-        st.sidebar.info("Click below to login with your Zerodha account")
         
-        # Generate login URL
+        # Show login button
+        st.sidebar.markdown("### 🔐 Kite Connect Login")
+        st.sidebar.info("Login with your Zerodha account")
+        
         login_url = kite.login_url()
         
-        # Custom HTML button that opens in same window
         st.sidebar.markdown(
-            f'''
-            <a href="{login_url}" target="_self">
-                <button style="
-                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                    color: white;
-                    padding: 0.6rem 1.2rem;
-                    border: none;
-                    border-radius: 6px;
-                    cursor: pointer;
-                    width: 100%;
-                    font-size: 1rem;
-                    font-weight: 600;
-                    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-                    transition: all 0.3s ease;
-                ">
-                    🚀 Login with Kite Connect
-                </button>
-            </a>
-            ''',
+            f'<a href="{login_url}" target="_self">'
+            f'<button style="background:#667eea;color:white;padding:0.6rem;'
+            f'border:none;border-radius:6px;cursor:pointer;width:100%;font-size:1rem;">'
+            f'🚀 Login with Kite</button></a>',
             unsafe_allow_html=True
         )
         
-        st.info("👈 Please login with Kite Connect in the sidebar to continue")
+        st.info("👈 Please login to continue")
         st.stop()
         return None
-    
-    return st.session_state.kite
 
 def logout_kite():
-    """Logout and clear session"""
-    # Clear all session state related to auth
-    keys_to_clear = ['access_token', 'kite', 'user_name', 'user_id', 'processed_token']
-    for key in keys_to_clear:
-        st.session_state.pop(key, None)
-    
-    # Clear query params
+    """Clean logout"""
+    st.session_state.clear()  # Clear everything
     st.query_params.clear()
     st.rerun()
 # ─────────────────────────────────────────────────────────────
@@ -706,7 +686,7 @@ def main():
         st.write("Auth State:", st.session_state.get('auth_state', 'none'))
         st.write("Has Token:", 'access_token' in st.session_state)
         st.write("Query Params:", dict(st.query_params))
-        
+
     st.markdown("""
     <div style='background: linear-gradient(135deg,#667eea,#764ba2,#f093fb);
                 padding:1.2rem;border-radius:14px;color:white;text-align:center'>
