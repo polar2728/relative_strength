@@ -37,74 +37,55 @@ BENCHMARK_CANDIDATES = {
 
 def handle_kite_auth():
     """
-    Handle Kite OAuth - returns (kite_instance, show_login_ui)
+    Returns (kite_instance or None, show_login_ui: bool)
     """
     try:
         api_key = st.secrets["KITE_API_KEY"]
         api_secret = st.secrets["KITE_API_SECRET"]
     except Exception:
-        st.sidebar.error("❌ Add KITE_API_KEY and KITE_API_SECRET to secrets")
+        st.sidebar.error("❌ Missing KITE_API_KEY / KITE_API_SECRET in secrets")
         return None, False
-    
+
     kite = KiteConnect(api_key=api_key)
-    
-    # Check if already authenticated
-    if 'kite_authenticated' in st.session_state and st.session_state.kite_authenticated:
-        return st.session_state.kite, False
-    
-    # Get query params
-    query_params = st.query_params
-    request_token = query_params.get('request_token')
-    
-    # Process callback
-    if request_token and not st.session_state.get('token_processed'):
-        try:
-            # Exchange token for access token
-            data = kite.generate_session(request_token, api_secret=api_secret)
-            access_token = data["access_token"]
-            
-            # Set access token
-            kite.set_access_token(access_token)
-            
-            # Get profile
-            profile = kite.profile()
-            
-            # Store in session
-            st.session_state.kite = kite
-            st.session_state.access_token = access_token
-            st.session_state.user_name = profile.get('user_name', 'User')
-            st.session_state.kite_authenticated = True
-            st.session_state.token_processed = True
-            
-            # CRITICAL: Use JavaScript to redirect and clear URL
-            st.markdown(
-                """
-                <script>
-                    window.location.href = window.location.origin + window.location.pathname;
-                </script>
-                """,
-                unsafe_allow_html=True
-            )
-            
-            # Show loading message
-            st.info("✅ Login successful! Redirecting...")
-            st.stop()
-            
-        except Exception as e:
-            st.error(f"❌ Authentication failed: {str(e)}")
-            st.session_state.token_processed = True  # Prevent retry loop
-            # Clear URL with JavaScript
-            st.markdown(
-                """
-                <script>
-                    window.location.href = window.location.origin + window.location.pathname;
-                </script>
-                """,
-                unsafe_allow_html=True
-            )
-            st.stop()
-    
-    # Not authenticated - return None and signal to show login UI
+
+    # ── Already authenticated ──
+    if 'access_token' in st.session_state and st.session_state.get('kite_authenticated', False):
+        kite.set_access_token(st.session_state.access_token)
+        return kite, False
+
+    # ── Handle OAuth callback ──
+    query_params = st.query_params.to_dict()  # safer than .get() for multi-value
+    request_token = query_params.get('request_token', [None])[0]
+
+    if request_token and not st.session_state.get('token_processed', False):
+        with st.spinner("Processing Kite login..."):
+            try:
+                data = kite.generate_session(request_token, api_secret=api_secret)
+                access_token = data["access_token"]
+                kite.set_access_token(access_token)
+
+                profile = kite.profile()
+
+                # Store securely
+                st.session_state.kite = kite
+                st.session_state.access_token = access_token
+                st.session_state.user_name = profile.get('user_name', 'User')
+                st.session_state.kite_authenticated = True
+                st.session_state.token_processed = True
+
+                # CRITICAL: Clear query params to prevent re-processing on rerun
+                st.query_params.clear()
+
+                st.success(f"✅ Logged in as {st.session_state.user_name}")
+                st.rerun()  # Force rerun to show main app
+
+            except Exception as e:
+                st.error(f"❌ Login failed: {str(e)}")
+                st.session_state.token_processed = True  # Prevent retry loop
+                st.query_params.clear()
+                st.rerun()
+
+    # If we reach here → not authenticated or callback already handled
     return None, True
 
 def show_login_ui(kite):
@@ -413,19 +394,25 @@ def fetch_benchmarks_sequential(kite, instrument_map):
 # MAIN - UPDATED WITH NEW AUTH
 # ─────────────────────────────────────────────────────────────
 def main():
-    # Handle authentication first
     kite, show_login = handle_kite_auth()
-    
+
     if show_login:
-        # Not authenticated - show login UI
-        try:
-            api_key = st.secrets["KITE_API_KEY"]
-            temp_kite = KiteConnect(api_key=api_key)
-            show_login_ui(temp_kite)
-        except:
-            st.error("❌ Configuration error. Check secrets.")
-        st.stop()
+        # Show login UI only if not authenticated
+        temp_kite = KiteConnect(api_key=st.secrets["KITE_API_KEY"])
+        show_login_ui(temp_kite)
+        st.stop()  # Important: stop here so main content doesn't render
         return
+
+    # ── Authenticated ── proceed with app
+    st.markdown("... your header ...")
+
+    if 'user_name' in st.session_state:
+        st.sidebar.markdown(f"**👤 {st.session_state.user_name}**")
+        if st.sidebar.button("🚪 Logout"):
+            for k in list(st.session_state.keys()):
+                del st.session_state[k]
+            st.query_params.clear()
+            st.rerun()
     
     # User is authenticated - show main app
     st.markdown("""
