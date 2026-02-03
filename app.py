@@ -682,8 +682,7 @@ def main():
 
         if len(df) > 0:
             # st.success(f"✅ Found **{len(df)} stocks** in {scan_duration:.0f}s")
-            
-            st.markdown("---")
+            # st.markdown("---")
             col1, col2 = st.columns([3, 1])
             
             with col1:
@@ -706,8 +705,8 @@ def main():
                 with st.expander("📈 All Benchmark Returns"):
                     st.dataframe(bm_table, hide_index=True, use_container_width=True)
 
-            st.markdown("---")
-            st.markdown(f"### 🎯 Top RS Leaders (≥ {min_rs}%) :small[Found **{len(df)} stocks** in {scan_duration:.0f}s]")
+            # st.markdown("---")
+            st.markdown(f"### 🎯 Top RS Leaders (≥ {min_rs}%) :green[Found **{len(df)} stocks** in {scan_duration:.0f}s]")
 
             def rsi_color(v):
                 if pd.isna(v): return ""
@@ -767,7 +766,7 @@ def main():
                 use_container_width=True
             )
 
-            st.markdown("---")
+            # st.markdown("---")
             st.markdown("### 💡 Key Metrics")
             
             col1, col2, col3, col4, col5 = st.columns(5)
