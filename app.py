@@ -36,62 +36,59 @@ BENCHMARK_CANDIDATES = {
 # ─────────────────────────────────────────────────────────────
 def handle_kite_auth():
     """
-    Returns (kite or None, show_login_ui: bool)
+    Returns kite (or None) and bool: whether to show login UI
     """
     try:
-        api_key    = st.secrets["KITE_API_KEY"]
+        api_key = st.secrets["KITE_API_KEY"]
         api_secret = st.secrets["KITE_API_SECRET"]
-    except Exception:
-        st.error("Missing KITE_API_KEY and/or KITE_API_SECRET in secrets")
+    except KeyError:
+        st.error("Missing KITE_API_KEY and/or KITE_API_SECRET in Streamlit secrets.")
         return None, False
 
     kite = KiteConnect(api_key=api_key)
 
-    # ── Already authenticated ────────────────────────────────────────
+    # Already logged in → skip everything
     if st.session_state.get("kite_authenticated", False):
-        kite.set_access_token(st.session_state.get("access_token"))
+        if "access_token" in st.session_state:
+            kite.set_access_token(st.session_state["access_token"])
         return kite, False
 
-    # ── OAuth callback handling ──────────────────────────────────────
-    params = st.query_params.to_dict()
-    request_token_list = params.get("request_token", [])
+    # ── Callback from Kite ───────────────────────────────────────────
+    if "request_token" in st.query_params and not st.session_state.get("auth_callback_handled", False):
+        # One-time processing guard (survives reruns)
+        st.session_state.auth_callback_handled = True
 
-    if request_token_list and not st.session_state.get("token_being_processed", False):
-        # Prevent re-processing on next rerun
-        st.session_state.token_being_processed = True
-
-        with st.spinner("Authenticating with Kite..."):
+        with st.spinner("Verifying Kite login..."):
             try:
-                request_token = request_token_list[0]
+                request_token = st.query_params["request_token"]
+                # Generate session
                 session_data = kite.generate_session(request_token, api_secret=api_secret)
                 access_token = session_data["access_token"]
                 kite.set_access_token(access_token)
 
                 profile = kite.profile()
 
-                # Store
+                # Save to session
                 st.session_state.kite = kite
                 st.session_state.access_token = access_token
                 st.session_state.user_name = profile.get("user_name", "User")
                 st.session_state.kite_authenticated = True
 
-                # Clear ALL query params immediately (prevents loop)
+                # Clear params NOW (prevents re-trigger on rerun)
                 st.query_params.clear()
 
-                st.success(f"✅ Connected as {st.session_state.user_name}")
-                
-                # Force clean rerun (without params)
-                st.rerun()
+                st.success(f"✅ Logged in as {st.session_state.user_name}")
+                st.rerun()  # Clean reload without params
 
             except Exception as e:
-                st.error(f"Login failed: {str(e)}")
-                # Still clear params to avoid stuck state
-                st.query_params.clear()
-                st.session_state.token_being_processed = False
+                st.error(f"Authentication error: {str(e)}")
+                st.query_params.clear()  # Still clear to break potential stuck state
+                st.session_state.auth_callback_handled = False  # Allow retry
                 st.rerun()
 
-    # ── Not authenticated & no active callback ───────────────────────
+    # Not authenticated, no active callback → show login
     return None, True
+
 
 def show_login_ui(kite):
     """Display login UI"""
@@ -399,29 +396,28 @@ def fetch_benchmarks_sequential(kite, instrument_map):
 # MAIN - UPDATED WITH NEW AUTH
 # ─────────────────────────────────────────────────────────────
 def main():
-    kite, need_login_ui = handle_kite_auth()
+    kite, show_login_ui_flag = handle_kite_auth()
 
-    if need_login_ui:
-        # Show only login screen
+    if show_login_ui_flag:
+        # Only show login screen
         try:
             temp_kite = KiteConnect(api_key=st.secrets["KITE_API_KEY"])
-            show_login_ui(temp_kite)
-        except:
-            st.error("Configuration error – check secrets")
-        st.stop()  # ← very important here
+            show_login_ui(temp_kite)  # your existing function
+        except KeyError:
+            st.error("Missing API key in secrets.")
+        st.stop()  # ← Critical: prevent rest of app from rendering
 
-    # ── Authenticated flow ───────────────────────────────────────────
-    st.markdown("""... your header ...""", unsafe_allow_html=True)
+    # Authenticated → full app
+    st.markdown("""<your header HTML>""", unsafe_allow_html=True)
 
-    # Sidebar user info + logout
-    if "user_name" in st.session_state:
-        st.sidebar.markdown(f"**👤 {st.session_state.user_name}**")
-        if st.sidebar.button("Logout", use_container_width=True):
-            # Clear everything
-            for k in list(st.session_state.keys()):
-                del st.session_state[k]
-            st.query_params.clear()
-            st.rerun()
+    # Sidebar extras
+    st.sidebar.markdown(f"**Connected as:** {st.session_state.get('user_name', 'User')}")
+    if st.sidebar.button("Logout"):
+        # Full clear
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
+        st.query_params.clear()
+        st.rerun()
     
     # User is authenticated - show main app
     st.markdown("""
