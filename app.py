@@ -35,58 +35,66 @@ BENCHMARK_CANDIDATES = {
 # KITE OAUTH - FIXED WITH JAVASCRIPT REDIRECT
 # ─────────────────────────────────────────────────────────────
 def handle_kite_auth():
-    """
-    Returns kite (or None) and bool: whether to show login UI
-    """
+    if st.session_state.get("kite_authenticated", False):
+        kite = st.session_state.kite
+        kite.set_access_token(st.session_state.access_token)
+        return kite, False
+
     try:
         api_key = st.secrets["KITE_API_KEY"]
         api_secret = st.secrets["KITE_API_SECRET"]
     except KeyError:
-        st.error("Missing KITE_API_KEY and/or KITE_API_SECRET in Streamlit secrets.")
+        st.error("Missing API key/secret in secrets")
         return None, False
 
     kite = KiteConnect(api_key=api_key)
 
-    # Already logged in → skip everything
-    if st.session_state.get("kite_authenticated", False):
-        if "access_token" in st.session_state:
-            kite.set_access_token(st.session_state["access_token"])
-        return kite, False
+    # Show login instructions
+    st.sidebar.markdown("### 🔐 Kite Login (Manual Token)")
+    st.sidebar.info("""
+    1. Click the button below to open Kite login in a new tab
+    2. Login with your Zerodha credentials
+    3. After login, you'll be redirected to a URL like:
+       https://your-app.streamlit.app/?request_token=xxxxxx&...
+    4. Copy the **entire URL** (or just the request_token= part)
+    5. Paste it below and click Submit
+    """)
 
-    # ── Callback from Kite ───────────────────────────────────────────
-    if "request_token" in st.query_params and not st.session_state.get("auth_callback_handled", False):
-        # One-time processing guard (survives reruns)
-        st.session_state.auth_callback_handled = True
+    login_url = kite.login_url()
+    st.sidebar.markdown(f"[Open Kite Login →]({login_url})", unsafe_allow_html=True)
 
-        with st.spinner("Verifying Kite login..."):
+    pasted_url = st.sidebar.text_input("Paste the full redirect URL here:", key="paste_url")
+
+    if st.sidebar.button("Submit Token", use_container_width=True) and pasted_url:
+        with st.spinner("Processing token..."):
             try:
-                request_token = st.query_params["request_token"]
-                # Generate session
+                # Extract request_token from pasted URL
+                from urllib.parse import urlparse, parse_qs
+                parsed = urlparse(pasted_url)
+                params = parse_qs(parsed.query)
+                request_token = params.get("request_token", [None])[0]
+
+                if not request_token:
+                    st.error("Could not find request_token in pasted URL. Copy the full redirected URL.")
+                    return None, True
+
                 session_data = kite.generate_session(request_token, api_secret=api_secret)
                 access_token = session_data["access_token"]
                 kite.set_access_token(access_token)
 
                 profile = kite.profile()
 
-                # Save to session
                 st.session_state.kite = kite
                 st.session_state.access_token = access_token
                 st.session_state.user_name = profile.get("user_name", "User")
                 st.session_state.kite_authenticated = True
 
-                # Clear params NOW (prevents re-trigger on rerun)
-                st.query_params.clear()
-
-                st.success(f"✅ Logged in as {st.session_state.user_name}")
-                st.rerun()  # Clean reload without params
-
-            except Exception as e:
-                st.error(f"Authentication error: {str(e)}")
-                st.query_params.clear()  # Still clear to break potential stuck state
-                st.session_state.auth_callback_handled = False  # Allow retry
+                st.success(f"✅ Connected as {st.session_state.user_name}")
                 st.rerun()
 
-    # Not authenticated, no active callback → show login
+            except Exception as e:
+                st.error(f"Token processing failed: {str(e)}")
+
     return None, True
 
 
@@ -396,16 +404,13 @@ def fetch_benchmarks_sequential(kite, instrument_map):
 # MAIN - UPDATED WITH NEW AUTH
 # ─────────────────────────────────────────────────────────────
 def main():
-    kite, show_login_ui_flag = handle_kite_auth()
+    kite, show_login = handle_kite_auth()
 
-    if show_login_ui_flag:
-        # Only show login screen
-        try:
-            temp_kite = KiteConnect(api_key=st.secrets["KITE_API_KEY"])
-            show_login_ui(temp_kite)  # your existing function
-        except KeyError:
-            st.error("Missing API key in secrets.")
-        st.stop()  # ← Critical: prevent rest of app from rendering
+    if show_login:
+        # Optional: show nice welcome message
+        st.markdown("### Welcome to NSE RS Leaders Scanner PRO")
+        st.info("Please complete login in the sidebar first.")
+        st.stop()
 
     # Authenticated → full app
     st.markdown("""<your header HTML>""", unsafe_allow_html=True)
