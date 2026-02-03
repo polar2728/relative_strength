@@ -501,7 +501,7 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode, trading_st
         st.error("❌ No valid benchmark found.")
         return pd.DataFrame(), None, pd.DataFrame()
 
-    st.info(f"✅ Selected {selected_benchmark} based on {lookback_label} performance ({best_ret*100:.2f}%)")
+    # st.info(f"✅ Selected {selected_benchmark} based on {lookback_label} performance ({best_ret*100:.2f}%)")
 
     # Scan stocks
     results = []
@@ -681,7 +681,7 @@ def main():
         scan_duration = time.time() - scan_start
 
         if len(df) > 0:
-            st.success(f"✅ Found **{len(df)} stocks** in {scan_duration:.0f}s")
+            # st.success(f"✅ Found **{len(df)} stocks** in {scan_duration:.0f}s")
             
             st.markdown("---")
             col1, col2 = st.columns([3, 1])
@@ -707,7 +707,7 @@ def main():
                     st.dataframe(bm_table, hide_index=True, use_container_width=True)
 
             st.markdown("---")
-            st.markdown(f"### 🎯 Top RS Leaders (≥ {min_rs}%)")
+            st.markdown(f"### 🎯 Top RS Leaders (≥ {min_rs}%) :small[Found **{len(df)} stocks** in {scan_duration:.0f}s]")
 
             def rsi_color(v):
                 if pd.isna(v): return ""
