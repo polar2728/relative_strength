@@ -19,7 +19,6 @@ st.set_page_config(page_title="NSE RS Leaders Scanner PRO", layout="wide")
 # ─────────────────────────────────────────────────────────────
 RS_LOOKBACK_6M = 126
 RS_LOOKBACK_3M = 63
-RS_LOOKBACK_55 = 55
 MIN_RS_RANK = 80
 MIN_LIQUIDITY_CR = 5
 
@@ -642,10 +641,6 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode, trading_st
                              selected_df["Close"].iloc[-1],
                              selected_df["Close"].iloc[-RS_LOOKBACK_3M])
 
-                rs55 = log_rs(price, close.iloc[-RS_LOOKBACK_55],
-                              selected_df["Close"].iloc[-1],
-                              selected_df["Close"].iloc[-RS_LOOKBACK_55])
-
                 rs_delta = rs3 - rs6
             except Exception:
                 continue
@@ -670,7 +665,6 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode, trading_st
                 "52W High": high_52w,
                 "52W H Dist%": pct_from_52w_high,
                 "RS": round(rs6, 3),
-                "RS_55": round(rs55, 3),
                 "RS_3M": round(rs3, 3),
                 "RS_6M": round(rs6, 3),
                 "RS_Delta": round(rs_delta, 3),
@@ -838,7 +832,6 @@ def main():
                 "52W High": "₹{:.2f}",
                 "52W H Dist%": "{:+.2f}%",
                 "RS": "{:.3f}",
-                "RS_55": "{:.3f}",
                 "RS_6M": "{:.3f}",
                 "RS_3M": "{:.3f}",
                 "RS_Delta": "{:+.3f}",
@@ -871,9 +864,6 @@ def main():
                     "52W H Dist%": st.column_config.TextColumn(
                         "52W H Dist%",
                         help="% distance of current close from the 52-week high (0% = at the high)"
-                    ),
-                    "RS_55": st.column_config.NumberColumn(
-                        "RS 55D", help="Log relative strength vs benchmark over 55 trading days (~11 weeks)"
                     ),
                     "Vol_Ratio": st.column_config.TextColumn("Vol Ratio", help="Today vs 20D avg"),
                     "Vol_Spike": st.column_config.TextColumn("Vol Spike", help="Recent 5D vs prev 20D"),
@@ -935,7 +925,6 @@ def main():
         **RS Lookback Periods:**
         - **RS 6M (126D)**: Core long-term relative strength
         - **RS 3M (63D)**: Medium-term momentum
-        - **RS 55D**: ~11-week confirmation window — sits between 3M and 6M to catch early trend confirmation
         - **RS Delta**: RS_3M minus RS_6M — positive = accelerating
         
         **52-Week High Columns:**
