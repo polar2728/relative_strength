@@ -482,6 +482,38 @@ def calculate_volume_metrics(df):
     }
 
 # ─────────────────────────────────────────────────────────────
+# 52-WEEK HIGH METRICS  ← NEW HELPER
+# ─────────────────────────────────────────────────────────────
+def calculate_52w_high_metrics(df):
+    """
+    Calculate 52-week high price and % distance of current close from it.
+    Uses the High column (intraday highs) for a true 52w high,
+    falling back to Close if fewer than 252 bars are available.
+    Returns:
+        high_52w  : float  – the highest intraday high in the last 252 trading days
+        pct_from_high : float – (close / high_52w - 1) * 100  (negative = below high)
+    """
+    if df.empty or len(df) < 2:
+        return None, None
+
+    # Use up to 252 trading days; if less data available use all of it
+    lookback = df.tail(252)
+
+    # Prefer the High column for a true 52-week high; fall back to Close
+    if "High" in lookback.columns:
+        high_52w = lookback["High"].max()
+    else:
+        high_52w = lookback["Close"].max()
+
+    if pd.isna(high_52w) or high_52w == 0:
+        return None, None
+
+    current_close = df["Close"].iloc[-1]
+    pct_from_high = round((current_close / high_52w - 1) * 100, 2)
+
+    return round(high_52w, 2), pct_from_high
+
+# ─────────────────────────────────────────────────────────────
 # RS SCAN - WITH TRADING STYLE SUPPORT
 # ─────────────────────────────────────────────────────────────
 def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode, trading_style):
@@ -613,6 +645,10 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode, trading_st
             
             vol_metrics = calculate_volume_metrics(df)
 
+            # ── NEW: 52-week high metrics ──────────────────────────────
+            high_52w, pct_from_52w_high = calculate_52w_high_metrics(df)
+            # ──────────────────────────────────────────────────────────
+
             clean = sym.replace(".NS", "")
             tv = f"https://tradingview.com/chart/?symbol=NSE%3A{clean}"
 
@@ -620,6 +656,10 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode, trading_st
                 "Symbol": clean,
                 "Name": name_map.get(clean, ""),
                 "Price": round(price, 2),
+                # ── NEW columns inserted right after Price ────────────
+                "52W High": high_52w,
+                "% from 52W High": pct_from_52w_high,
+                # ─────────────────────────────────────────────────────
                 "RS": round(rs6, 3),
                 "RS_3M": round(rs3, 3),
                 "RS_6M": round(rs6, 3),
@@ -769,8 +809,25 @@ def main():
                 if v >= 1.5: return "background-color:#d1ecf1;color:#0c5460"
                 return ""
 
+            # ── NEW: colour-code % from 52W High ──────────────────────
+            def pct_from_high_color(v):
+                """
+                Green  : within  -5 %  of the high  (near breakout territory)
+                Yellow : between -5 % and -15 %      (approaching)
+                Red    : more than -15 % below        (far from high)
+                """
+                if pd.isna(v): return ""
+                if v >= -5:  return "background-color:#d4edda;color:#155724;font-weight:bold"
+                if v >= -15: return "background-color:#fff3cd;color:#856404"
+                return "background-color:#f8d7da;color:#721c24"
+            # ──────────────────────────────────────────────────────────
+
             styled = df.style.format({
                 "Price": "₹{:.2f}",
+                # ── NEW format entries ─────────────────────────────────
+                "52W High": "₹{:.2f}",
+                "% from 52W High": "{:+.2f}%",
+                # ───────────────────────────────────────────────────────
                 "RS": "{:.3f}",
                 "RS_6M": "{:.3f}",
                 "RS_3M": "{:.3f}",
@@ -788,7 +845,10 @@ def main():
                 vmin=min_rs,
                 vmax=100
             ).map(rsi_color, subset=["RSI_D", "RSI_W", "RSI_M"]
-            ).map(vol_ratio_color, subset=["Vol_Ratio"])
+            ).map(vol_ratio_color, subset=["Vol_Ratio"]
+            # ── NEW: apply colour styling to the new column ───────────
+            ).map(pct_from_high_color, subset=["% from 52W High"])
+            # ─────────────────────────────────────────────────────────
 
             st.dataframe(
                 styled,
@@ -797,6 +857,15 @@ def main():
                 column_config={
                     "Chart": st.column_config.LinkColumn("Chart", display_text="📈 View"),
                     "Momentum": st.column_config.TextColumn("Momentum", help="RS 3M vs 6M"),
+                    # ── NEW column configs ────────────────────────────
+                    "52W High": st.column_config.NumberColumn(
+                        "52W High", help="Highest intraday high in the last 52 weeks"
+                    ),
+                    "% from 52W High": st.column_config.TextColumn(
+                        "% from 52W High",
+                        help="How far current close is from the 52-week high (0% = at the high)"
+                    ),
+                    # ─────────────────────────────────────────────────
                     "Vol_Ratio": st.column_config.TextColumn("Vol Ratio", help="Today vs 20D avg"),
                     "Vol_Spike": st.column_config.TextColumn("Vol Spike", help="Recent 5D vs prev 20D"),
                     "Vol_Trend": st.column_config.TextColumn("Vol Trend", help="20D volume MA trend"),
@@ -817,7 +886,7 @@ def main():
 
             st.markdown("### 💡 Key Metrics")
             
-            col1, col2, col3, col4, col5 = st.columns(5)
+            col1, col2, col3, col4, col5, col6 = st.columns(6)   # ← added col6
             
             with col1:
                 st.metric("Avg RS Rank", f"{df['RS_Rank'].mean():.1f}%")
@@ -838,6 +907,12 @@ def main():
                 high_vol = len(df[df["Vol_Ratio"] >= 2.0])
                 st.metric("Vol >2x", f"{high_vol}")
 
+            # ── NEW summary metric ────────────────────────────────────
+            with col6:
+                near_high = len(df[df["% from 52W High"] >= -5]) if "% from 52W High" in df.columns else 0
+                st.metric("Near 52W High", f"{near_high}", help="Stocks within 5% of their 52-week high")
+            # ──────────────────────────────────────────────────────────
+
         else:
             st.warning("⚠️ No stocks passed filters. Try relaxing criteria.")
 
@@ -847,6 +922,13 @@ def main():
         - **Swing (3M Focus)**: More responsive, 3-month lookback
         - **Position (6M Focus)**: More stable, 6-month lookback
         - **Hybrid (6M)**: Default 6-month approach
+        
+        **52-Week High Columns:**
+        - **52W High**: Highest intraday high over the last 252 trading days
+        - **% from 52W High**: Distance of today's close from the 52W high
+          - 🟢 Green (≥ -5%): Near breakout territory
+          - 🟡 Yellow (-5% to -15%): Approaching the high
+          - 🔴 Red (< -15%): Far from the high
         
         **Volume Analysis:**
         - **Vol Ratio**: Today vs 20-day average (>2x = significant)
