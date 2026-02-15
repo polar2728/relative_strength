@@ -10,8 +10,6 @@ from datetime import datetime, timedelta
 from kiteconnect import KiteConnect
 from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception_type
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from pytrends.request import TrendReq
-from scipy import stats as scipy_stats
 
 warnings.filterwarnings("ignore")
 st.set_page_config(page_title="NSE RS Leaders Scanner PRO", layout="wide")
@@ -32,302 +30,6 @@ BENCHMARK_CANDIDATES = {
     "Nifty 500": "NIFTY 500",
     "Nifty Midcap 150": "NIFTY MIDCAP 150"
 }
-
-# ─────────────────────────────────────────────────────────────
-# GOOGLE TRENDS ANALYSIS
-# ─────────────────────────────────────────────────────────────
-
-def test_google_trends():
-    """
-    Test if Google Trends API is working
-    Returns True if working, False otherwise
-    """
-    try:
-        st.info("🧪 Testing Google Trends API...")
-        
-        # Test with a well-known term - use simpler initialization
-        pytrends = TrendReq(hl='en-US', tz=360)
-        pytrends.build_payload(['Reliance'], cat=0, timeframe='today 3-m', geo='', gprop='')
-        
-        data = pytrends.interest_over_time()
-        
-        if data is not None and not data.empty:
-            st.success("✅ Google Trends is working! You can proceed with analysis.")
-            return True
-        else:
-            st.error("❌ Google Trends returned no data. Wait 30 minutes and try again.")
-            return False
-            
-    except Exception as e:
-        st.error(f"❌ Google Trends test failed: {str(e)[:200]}")
-        st.warning("⚠️ Possible causes: Rate limit hit, network issue, or API changes")
-        st.info("💡 Solution: Wait 30-60 minutes before trying again, or reduce concurrent usage")
-        return False
-
-
-def simplify_company_name(name):
-    """Simplify company name for Google Trends search"""
-    name = str(name).upper()
-    
-    # Remove common suffixes
-    suffixes = [' LIMITED', ' LTD', ' LTD.', ' INDIA', ' PVT', ' PRIVATE', 
-                ' CORPORATION', ' CORP', ' COMPANY', ' CO', ' INDUSTRIES', ' IND',
-                ' INTERNATIONAL', ' INTL']
-    
-    for suffix in suffixes:
-        if name.endswith(suffix):
-            name = name[:len(name)-len(suffix)]
-    
-    # Remove noise words
-    noise_words = ['THE', 'AND', '&']
-    words = name.strip().split()
-    words = [w for w in words if w not in noise_words]
-    
-    # Take first 1-2 words for better matching
-    if len(words) > 2:
-        name = ' '.join(words[:2])
-    else:
-        name = ' '.join(words)
-    
-    return name.strip().title()  # Title case for better Google Trends match
-
-
-def analyze_single_stock_trends(symbol, company_name, current_price, price_3m_change, retry_count=0):
-    """
-    Analyze single stock with Google Trends
-    Returns dict with trends metrics or None if failed
-    """
-    max_retries = 2
-    
-    try:
-        # Simplify name for search
-        search_term = simplify_company_name(company_name)
-        
-        # Longer wait to avoid rate limits (5-7 seconds)
-        base_delay = 5
-        if retry_count > 0:
-            base_delay += retry_count * 2  # Increase delay on retries
-        
-        time.sleep(base_delay)
-        
-        # Initialize pytrends with simpler settings to avoid compatibility issues
-        pytrends = TrendReq(hl='en-US', tz=360)
-        
-        # Build payload
-        pytrends.build_payload([search_term], cat=0, timeframe='today 12-m', geo='', gprop='')
-        
-        # Get trends data
-        trends_data = pytrends.interest_over_time()
-        
-        if trends_data is None or trends_data.empty:
-            if retry_count < max_retries:
-                time.sleep(10)  # Wait longer before retry
-                return analyze_single_stock_trends(symbol, company_name, current_price, price_3m_change, retry_count + 1)
-            return None
-        
-        # Remove isPartial column
-        if 'isPartial' in trends_data.columns:
-            trends_data = trends_data.drop('isPartial', axis=1)
-        
-        if search_term not in trends_data.columns:
-            return None
-        
-        trends_series = trends_data[search_term]
-        
-        # Calculate trends slope (3 months)
-        recent_trends = trends_series.tail(13)  # ~3 months of weekly data
-        x = np.arange(len(recent_trends))
-        y = recent_trends.values
-        
-        if np.sum(y) == 0:
-            return None
-        
-        trends_slope, _, _, _, _ = scipy_stats.linregress(x, y)
-        mean_val = recent_trends.mean()
-        trends_slope_norm = (trends_slope / mean_val * 100) if mean_val > 0 else 0
-        
-        # Calculate search percentile
-        current_interest = trends_series.iloc[-1]
-        search_percentile = scipy_stats.percentileofscore(trends_series.values, current_interest)
-        
-        # Calculate divergence (trends vs price)
-        price_slope_approx = price_3m_change / 3  # Rough monthly slope
-        
-        divergence = trends_slope_norm - price_slope_approx
-        
-        # Calculate conviction score
-        divergence_score = ((np.clip(divergence, -50, 50) + 50) / 100) * 100
-        
-        conviction = (
-            divergence_score * 0.40 +
-            search_percentile * 0.40 +
-            50 * 0.20
-        )
-        
-        # Get average search interest
-        avg_search = round(trends_series.mean(), 1)
-        
-        return {
-            'Search_Term': search_term,
-            'Trends_Slope': round(trends_slope_norm, 2),
-            'Search_Percentile': round(search_percentile, 1),
-            'Divergence': round(divergence, 2),
-            'Conviction_Score': round(conviction, 1),
-            'Avg_Search': avg_search,
-            'Status': 'Complete'
-        }
-        
-    except Exception as e:
-        if retry_count < max_retries:
-            time.sleep(15)  # Wait even longer before retry
-            return analyze_single_stock_trends(symbol, company_name, current_price, price_3m_change, retry_count + 1)
-        return None
-
-
-def add_google_trends_analysis(df_rs_leaders, kite, instrument_map):
-    """
-    Add Google Trends analysis to filtered RS leaders
-    
-    Parameters:
-    - df_rs_leaders: DataFrame from RS scan (already filtered)
-    - kite: KiteConnect instance
-    - instrument_map: Instrument token map
-    
-    Returns:
-    - Enhanced DataFrame with Trends columns
-    """
-    
-    st.info(f"🔍 Adding Google Trends analysis to {len(df_rs_leaders)} RS leaders...")
-    st.warning("⏱️ This will take ~5-10 minutes (5-7 sec per stock with retries)")
-    
-    # Reset index to ensure sequential numbering
-    df_rs_leaders = df_rs_leaders.reset_index(drop=True)
-    
-    # Create progress tracking
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    
-    results = []
-    successful = 0
-    failed = 0
-    failed_stocks = []
-    
-    # Use enumerate for proper sequential indexing
-    for idx, (_, row) in enumerate(df_rs_leaders.iterrows()):
-        symbol = row['Symbol']
-        company_name = row['Name']
-        
-        # Get price data to calculate 3M price change
-        try:
-            stock_data = st.session_state.get('stock_data', {})
-            
-            if f"{symbol}.NS" in stock_data:
-                df_stock = stock_data[f"{symbol}.NS"]
-                
-                if len(df_stock) >= 63:
-                    current_price = df_stock['Close'].iloc[-1]
-                    price_3m_ago = df_stock['Close'].iloc[-63]
-                    price_3m_change = ((current_price / price_3m_ago) - 1) * 100
-                else:
-                    price_3m_change = 0
-            else:
-                price_3m_change = 0
-            
-            current_price = row.get('Price', 0)
-            
-        except:
-            current_price = row.get('Price', 0)
-            price_3m_change = 0
-        
-        # Update status with live counters
-        search_term_display = simplify_company_name(company_name)
-        status_text.info(f"📊 {idx + 1}/{len(df_rs_leaders)}: {search_term_display[:30]} | ✅ {successful} | ❌ {failed}")
-        
-        # Analyze with Google Trends
-        trends_result = analyze_single_stock_trends(
-            symbol, 
-            company_name, 
-            current_price,
-            price_3m_change
-        )
-        
-        if trends_result:
-            successful += 1
-            results.append({
-                'Symbol': symbol,
-                **trends_result
-            })
-        else:
-            failed += 1
-            failed_stocks.append(f"{symbol} ({search_term_display})")
-            results.append({
-                'Symbol': symbol,
-                'Search_Term': search_term_display,
-                'Trends_Slope': None,
-                'Search_Percentile': None,
-                'Divergence': None,
-                'Conviction_Score': None,
-                'Avg_Search': None,
-                'Status': 'Failed'
-            })
-        
-        # Update progress
-        progress = (idx + 1) / len(df_rs_leaders)
-        progress = min(progress, 1.0)
-        progress_bar.progress(progress)
-        
-        # Early warning if all failing
-        if idx >= 9 and successful == 0:
-            st.error("""
-            ⚠️ **Stopping - All stocks failing**
-            
-            Google Trends is blocking all requests.
-            
-            **Action:** Wait 30-60 minutes, then try Test API again.
-            """)
-            break
-    
-    # Create results dataframe
-    trends_df = pd.DataFrame(results)
-    
-    # Merge with original RS leaders
-    enhanced_df = df_rs_leaders.merge(trends_df, on='Symbol', how='left')
-    
-    # Clear progress
-    progress_bar.empty()
-    status_text.empty()
-    
-    # Show summary
-    success_rate = (successful / len(results) * 100) if len(results) > 0 else 0
-    
-    if successful > 0:
-        st.success(f"""
-        ✅ **Analysis Complete!**
-        - Analyzed: {len(results)} stocks
-        - Successful: {successful} ({success_rate:.1f}%)
-        - Failed: {failed}
-        """)
-        
-        if failed > 0 and failed < len(results):
-            with st.expander(f"ℹ️ View {failed} failed stocks"):
-                for stock in failed_stocks[:20]:
-                    st.write(f"- {stock}")
-                if len(failed_stocks) > 20:
-                    st.write(f"... and {len(failed_stocks) - 20} more")
-    else:
-        st.error("""
-        ❌ **All requests failed**
-        
-        **Why:** API rate limit or temporary block
-        
-        **Solutions:**
-        1. Wait 30-60 minutes
-        2. Try off-peak hours (2-6 AM IST)
-        3. Use RS results alone (still excellent!)
-        """)
-    
-    return enhanced_df
-
 
 # ─────────────────────────────────────────────────────────────
 # KITE CONNECT OAUTH AUTHENTICATION
@@ -780,7 +482,7 @@ def calculate_volume_metrics(df):
     }
 
 # ─────────────────────────────────────────────────────────────
-# 52-WEEK HIGH METRICS
+# 52-WEEK HIGH METRICS  ← NEW HELPER
 # ─────────────────────────────────────────────────────────────
 def calculate_52w_high_metrics(df):
     """
@@ -853,9 +555,6 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode, trading_st
             instrument_map,
             max_workers=5
         )
-    
-    # Store stock data in session state for trends analysis
-    st.session_state.stock_data = stock_data
 
     best_ret = -1e9
     selected_df = None
@@ -954,6 +653,8 @@ def rs_scan(kite, symbols, name_map, min_rs, min_liq, benchmark_mode, trading_st
             
             vol_metrics = calculate_volume_metrics(df)
 
+            # high_52w and pct_from_52w_high already computed above for filtering
+
             clean = sym.replace(".NS", "")
             tv = f"https://tradingview.com/chart/?symbol=NSE%3A{clean}"
 
@@ -1022,8 +723,8 @@ def main():
     st.markdown("""
     <div style='background: linear-gradient(135deg,#667eea,#764ba2,#f093fb);
                 padding:1.2rem;border-radius:14px;color:white;text-align:center'>
-        <h2 style='margin:0'>🏆 NSE RS Leaders Scanner PRO + Google Trends</h2>
-        <p style='margin:0;font-size:0.9rem'>Relative Strength • Volume Analysis • Trends Conviction</p>
+        <h2 style='margin:0'>🏆 NSE RS Leaders Scanner PRO</h2>
+        <p style='margin:0;font-size:0.9rem'>Relative Strength • Volume Analysis • Multi-Timeframe RSI</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -1065,8 +766,7 @@ def main():
         help="Minimum 30-day avg daily liquidity"
     )
 
-    # Main scan button
-    if st.sidebar.button("🚀 RUN RS SCAN", use_container_width=True, type="primary"):
+    if st.sidebar.button("🚀 RUN SCAN", use_container_width=True, type="primary"):
         syms, name_map = load_nse_universe()
         symbols = load_nifty50_symbols() if universe == "Nifty 50" else syms
 
@@ -1077,315 +777,170 @@ def main():
         scan_start = time.time()
         df, selected_benchmark, bm_table = rs_scan(kite, symbols, name_map, min_rs, min_liq, "Auto", trading_style)
         scan_duration = time.time() - scan_start
-        
-        # Store in session state
-        st.session_state.rs_results = df
-        st.session_state.selected_benchmark = selected_benchmark
-        st.session_state.bm_table = bm_table
 
-    # Display RS results if available
-    if 'rs_results' in st.session_state and len(st.session_state.rs_results) > 0:
-        df = st.session_state.rs_results
-        selected_benchmark = st.session_state.selected_benchmark
-        bm_table = st.session_state.bm_table
-        
-        col1, col2 = st.columns([3, 1])
-        
-        with col1:
-            st.markdown(f"### 📊 Benchmark: **{selected_benchmark}**")
-        
-        with col2:
+        if len(df) > 0:
+            col1, col2 = st.columns([3, 1])
+            
+            with col1:
+                st.markdown(f"### 📊 Benchmark: **{selected_benchmark}**")
+            
+            with col2:
+                if not bm_table.empty:
+                    if trading_style == "Swing (3M Focus)":
+                        perf_col = "Return_3M"
+                        timeframe = "3M"
+                    else:
+                        perf_col = "Return_6M"
+                        timeframe = "6M"
+                    
+                    best_perf = bm_table.iloc[0][perf_col]
+                    st.metric(f"{timeframe} Return", f"{best_perf}%")
+
             if not bm_table.empty:
-                if trading_style == "Swing (3M Focus)":
-                    perf_col = "Return_3M"
-                    timeframe = "3M"
-                else:
-                    perf_col = "Return_6M"
-                    timeframe = "6M"
-                
-                best_perf = bm_table.iloc[0][perf_col]
-                st.metric(f"{timeframe} Return", f"{best_perf}%")
+                with st.expander("📈 All Benchmark Returns"):
+                    st.dataframe(bm_table, hide_index=True, use_container_width=True)
 
-        if not bm_table.empty:
-            with st.expander("📈 All Benchmark Returns"):
-                st.dataframe(bm_table, hide_index=True, use_container_width=True)
+            st.markdown(f"### 🎯 Top RS Leaders (≥ {min_rs}%) :green[Found **{len(df)} stocks** in {scan_duration:.0f}s]")
 
-        st.markdown(f"### 🎯 Top RS Leaders (≥ {min_rs}%) :green[Found **{len(df)} stocks**]")
-        
-        # Add Google Trends Analysis section
-        st.markdown("---")
-        st.markdown("#### 🔍 Google Trends Conviction Layer (Optional)")
-        
-        col_info, col_test, col_analyze = st.columns([2, 1, 1])
-        
-        with col_info:
-            st.info(f"Enhance {len(df)} RS leaders with search interest analysis")
-            st.caption("⏱️ Takes ~5-10 minutes (5-7 sec per stock)")
-        
-        with col_test:
-            if st.button("🧪 Test API", use_container_width=True):
-                test_result = test_google_trends()
-                if test_result:
-                    st.session_state.trends_api_working = True
-                else:
-                    st.session_state.trends_api_working = False
-        
-        with col_analyze:
-            # Only enable if not tested or if test passed
-            api_status = st.session_state.get('trends_api_working', None)
+            def rsi_color(v):
+                if pd.isna(v): return ""
+                if v >= 60: return "background-color:#d4edda;color:#155724"
+                if v <= 40: return "background-color:#f8d7da;color:#721c24"
+                return ""
             
-            if api_status is False:
-                st.button("🚀 ADD TRENDS", use_container_width=True, disabled=True, 
-                         help="API test failed. Wait 30 min and test again.")
-            elif st.button("🚀 ADD TRENDS", use_container_width=True, type="primary"):
-                # Add Google Trends analysis
-                enhanced_df = add_google_trends_analysis(
-                    df, 
-                    kite, 
-                    st.session_state.instrument_map
-                )
-                
-                # Store enhanced results
-                st.session_state.enhanced_results = enhanced_df
-                st.rerun()
-        
-        # Tips if API test failed
-        if api_status is False:
-            st.warning("""
-            ⚠️ **Google Trends API is currently unavailable**
+            def vol_ratio_color(v):
+                if pd.isna(v): return ""
+                if v >= 2.5: return "background-color:#fff3cd;color:#856404;font-weight:bold"
+                if v >= 1.5: return "background-color:#d1ecf1;color:#0c5460"
+                return ""
+
+            # ── NEW: colour-code % from 52W High ──────────────────────
+            def pct_from_high_color(v):
+                """
+                Green  : within  -5 %  of the high  (near breakout territory)
+                Yellow : between -5 % and -15 %      (approaching)
+                Red    : more than -15 % below        (far from high)
+                """
+                if pd.isna(v): return ""
+                if v >= -5:  return "background-color:#d4edda;color:#155724;font-weight:bold"
+                if v >= -15: return "background-color:#fff3cd;color:#856404"
+                return "background-color:#f8d7da;color:#721c24"
+            # ──────────────────────────────────────────────────────────
+
+            styled = df.style.format({
+                "Price": "₹{:.2f}",
+                "52W High": "₹{:.2f}",
+                "52W H Dist%": "{:+.2f}%",
+                "RS": "{:.3f}",
+                "RS_6M": "{:.3f}",
+                "RS_3M": "{:.3f}",
+                "RS_Delta": "{:+.3f}",
+                "LiquidityCr": "₹{:.1f}Cr",
+                "RSI_D": lambda x: f"{x:.1f}" if pd.notna(x) else "-",
+                "RSI_W": lambda x: f"{x:.1f}" if pd.notna(x) else "-",
+                "RSI_M": lambda x: f"{x:.1f}" if pd.notna(x) else "-",
+                "Vol_Ratio": lambda x: f"{x:.2f}x" if pd.notna(x) else "-",
+                "Vol_Spike": lambda x: f"{x:.2f}x" if pd.notna(x) else "-",
+                "RS_Rank": "{:.1f}%"
+            }).background_gradient(
+                subset=["RS_Rank"], 
+                cmap="RdYlGn",
+                vmin=min_rs,
+                vmax=100
+            ).map(rsi_color, subset=["RSI_D", "RSI_W", "RSI_M"]
+            ).map(vol_ratio_color, subset=["Vol_Ratio"]
+            ).map(pct_from_high_color, subset=["52W H Dist%"])
+
+            st.dataframe(
+                styled,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Chart": st.column_config.LinkColumn("Chart", display_text="📈 View"),
+                    "Momentum": st.column_config.TextColumn("Momentum", help="RS 3M vs 6M"),
+                    "52W High": st.column_config.NumberColumn(
+                        "52W High", help="Highest intraday high in the last 52 weeks"
+                    ),
+                    "52W H Dist%": st.column_config.TextColumn(
+                        "52W H Dist%",
+                        help="% distance of current close from the 52-week high (0% = at the high)"
+                    ),
+                    "Vol_Ratio": st.column_config.TextColumn("Vol Ratio", help="Today vs 20D avg"),
+                    "Vol_Spike": st.column_config.TextColumn("Vol Spike", help="Recent 5D vs prev 20D"),
+                    "Vol_Trend": st.column_config.TextColumn("Vol Trend", help="20D volume MA trend"),
+                    "Vol_Breakout": st.column_config.TextColumn("🔥", help="Vol breakout signal")
+                },
+                height=420
+            )
+
+            csv = df.to_csv(index=False).encode("utf-8")
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+            st.download_button(
+                "📥 Download CSV",
+                csv,
+                f"RS_Leaders_{timestamp}.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+
+            st.markdown("### 💡 Key Metrics")
             
-            **Why this happens:**
-            - Rate limits (too many requests)
-            - Temporary API blocks
-            - Network issues
-            
-            **What to do:**
-            1. Wait 30-60 minutes
-            2. Try during off-peak hours (2-6 AM IST)
-            3. Test again with 🧪 Test API button
-            4. Use RS results alone (they're still valuable!)
-            
-            **Alternative:** Your RS scan results are already excellent for trading decisions!
-            """)
-        
-        # Display enhanced results if available
-        if 'enhanced_results' in st.session_state:
-            display_df = st.session_state.enhanced_results
-            st.markdown("#### 📊 Results with Google Trends Conviction")
-        else:
-            display_df = df
-        
-        # Color functions
-        def rsi_color(v):
-            if pd.isna(v): return ""
-            if v >= 60: return "background-color:#d4edda;color:#155724"
-            if v <= 40: return "background-color:#f8d7da;color:#721c24"
-            return ""
-        
-        def vol_ratio_color(v):
-            if pd.isna(v): return ""
-            if v >= 2.5: return "background-color:#fff3cd;color:#856404;font-weight:bold"
-            if v >= 1.5: return "background-color:#d1ecf1;color:#0c5460"
-            return ""
-
-        def pct_from_high_color(v):
-            if pd.isna(v): return ""
-            if v >= -5:  return "background-color:#d4edda;color:#155724;font-weight:bold"
-            if v >= -15: return "background-color:#fff3cd;color:#856404"
-            return "background-color:#f8d7da;color:#721c24"
-        
-        def conviction_color(v):
-            """Color code conviction scores"""
-            if pd.isna(v): return ""
-            if v >= 75: return "background-color:#d4edda;color:#155724;font-weight:bold"
-            if v >= 60: return "background-color:#d1ecf1;color:#0c5460"
-            if v >= 40: return "background-color:#fff3cd;color:#856404"
-            return "background-color:#f8d7da;color:#721c24"
-
-        # Format and style
-        format_dict = {
-            "Price": "₹{:.2f}",
-            "52W High": "₹{:.2f}",
-            "52W H Dist%": "{:+.2f}%",
-            "RS": "{:.3f}",
-            "RS_6M": "{:.3f}",
-            "RS_3M": "{:.3f}",
-            "RS_Delta": "{:+.3f}",
-            "LiquidityCr": "₹{:.1f}Cr",
-            "RSI_D": lambda x: f"{x:.1f}" if pd.notna(x) else "-",
-            "RSI_W": lambda x: f"{x:.1f}" if pd.notna(x) else "-",
-            "RSI_M": lambda x: f"{x:.1f}" if pd.notna(x) else "-",
-            "Vol_Ratio": lambda x: f"{x:.2f}x" if pd.notna(x) else "-",
-            "Vol_Spike": lambda x: f"{x:.2f}x" if pd.notna(x) else "-",
-            "RS_Rank": "{:.1f}%"
-        }
-        
-        # Add trends formatting if available
-        if 'Conviction_Score' in display_df.columns:
-            format_dict.update({
-                "Conviction_Score": lambda x: f"{x:.1f}" if pd.notna(x) else "-",
-                "Divergence": lambda x: f"{x:+.2f}" if pd.notna(x) else "-",
-                "Search_Percentile": lambda x: f"{x:.1f}%" if pd.notna(x) else "-",
-                "Trends_Slope": lambda x: f"{x:+.2f}" if pd.notna(x) else "-",
-                "Avg_Search": lambda x: f"{x:.0f}" if pd.notna(x) else "-"
-            })
-
-        styled = display_df.style.format(format_dict
-        ).background_gradient(
-            subset=["RS_Rank"], 
-            cmap="RdYlGn",
-            vmin=min_rs,
-            vmax=100
-        ).map(rsi_color, subset=["RSI_D", "RSI_W", "RSI_M"]
-        ).map(vol_ratio_color, subset=["Vol_Ratio"]
-        ).map(pct_from_high_color, subset=["52W H Dist%"])
-        
-        # Add conviction coloring if available
-        if 'Conviction_Score' in display_df.columns:
-            styled = styled.map(conviction_color, subset=["Conviction_Score"])
-
-        column_config = {
-            "Chart": st.column_config.LinkColumn("Chart", display_text="📈 View"),
-            "Momentum": st.column_config.TextColumn("Momentum", help="RS 3M vs 6M"),
-            "52W High": st.column_config.NumberColumn(
-                "52W High", help="Highest intraday high in the last 52 weeks"
-            ),
-            "52W H Dist%": st.column_config.TextColumn(
-                "52W H Dist%",
-                help="% distance of current close from the 52-week high"
-            ),
-            "Vol_Ratio": st.column_config.TextColumn("Vol Ratio", help="Today vs 20D avg"),
-            "Vol_Spike": st.column_config.TextColumn("Vol Spike", help="Recent 5D vs prev 20D"),
-            "Vol_Trend": st.column_config.TextColumn("Vol Trend", help="20D volume MA trend"),
-            "Vol_Breakout": st.column_config.TextColumn("🔥", help="Vol breakout signal")
-        }
-        
-        # Add trends column configs if available
-        if 'Conviction_Score' in display_df.columns:
-            column_config.update({
-                "Conviction_Score": st.column_config.NumberColumn(
-                    "Conviction",
-                    help="Google Trends conviction score (0-100)"
-                ),
-                "Divergence": st.column_config.TextColumn(
-                    "Divergence",
-                    help="Search trend vs price trend"
-                ),
-                "Search_Percentile": st.column_config.TextColumn(
-                    "Search %ile",
-                    help="Current search interest vs historical"
-                ),
-                "Search_Term": st.column_config.TextColumn(
-                    "Search Term",
-                    help="Simplified name used for Google Trends"
-                )
-            })
-
-        st.dataframe(
-            styled,
-            use_container_width=True,
-            hide_index=True,
-            column_config=column_config,
-            height=500
-        )
-
-        # Download button
-        csv = display_df.to_csv(index=False).encode("utf-8")
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-        filename = f"RS_Leaders_Trends_{timestamp}.csv" if 'Conviction_Score' in display_df.columns else f"RS_Leaders_{timestamp}.csv"
-        
-        st.download_button(
-            "📥 Download CSV",
-            csv,
-            filename,
-            mime="text/csv",
-            use_container_width=True
-        )
-
-        # Metrics
-        st.markdown("### 💡 Key Metrics")
-        
-        if 'Conviction_Score' in display_df.columns:
-            # Enhanced metrics with trends
-            col1, col2, col3, col4, col5, col6, col7 = st.columns(7)
+            col1, col2, col3, col4, col5, col6 = st.columns(6)   # ← added col6
             
             with col1:
-                st.metric("Avg RS Rank", f"{display_df['RS_Rank'].mean():.1f}%")
+                st.metric("Avg RS Rank", f"{df['RS_Rank'].mean():.1f}%")
             
             with col2:
-                improving = len(display_df[display_df["RS_Delta"] > 0])
-                st.metric("Accelerating", f"{improving}/{len(display_df)}")
+                improving = len(df[df["RS_Delta"] > 0])
+                st.metric("Accelerating", f"{improving}/{len(df)}")
             
             with col3:
-                high_conv = len(display_df[display_df["Conviction_Score"] >= 70])
-                st.metric("High Conviction", f"{high_conv}", help="Conviction ≥70")
-            
-            with col4:
-                pos_div = len(display_df[display_df["Divergence"] > 0])
-                st.metric("Pos Divergence", f"{pos_div}", help="Search > Price")
-            
-            with col5:
-                vol_breakouts = len(display_df[display_df["Vol_Breakout"] == "🔥"])
-                st.metric("🔥 Vol Breakout", f"{vol_breakouts}")
-            
-            with col6:
-                near_high = len(display_df[display_df["52W H Dist%"] >= -5])
-                st.metric("Near 52W High", f"{near_high}")
-            
-            with col7:
-                trends_success = len(display_df[display_df["Status"] == "Complete"])
-                st.metric("Trends Success", f"{trends_success}/{len(display_df)}")
-        
-        else:
-            # Original metrics without trends
-            col1, col2, col3, col4, col5, col6 = st.columns(6)
-            
-            with col1:
-                st.metric("Avg RS Rank", f"{display_df['RS_Rank'].mean():.1f}%")
-            
-            with col2:
-                improving = len(display_df[display_df["RS_Delta"] > 0])
-                st.metric("Accelerating", f"{improving}/{len(display_df)}")
-            
-            with col3:
-                overbought = len(display_df[display_df["RSI_D"] > 70])
+                overbought = len(df[df["RSI_D"] > 70])
                 st.metric("Overbought", f"{overbought}")
             
             with col4:
-                vol_breakouts = len(display_df[display_df["Vol_Breakout"] == "🔥"])
+                vol_breakouts = len(df[df["Vol_Breakout"] == "🔥"])
                 st.metric("🔥 Vol Breakout", f"{vol_breakouts}")
             
             with col5:
-                high_vol = len(display_df[display_df["Vol_Ratio"] >= 2.0])
+                high_vol = len(df[df["Vol_Ratio"] >= 2.0])
                 st.metric("Vol >2x", f"{high_vol}")
-            
-            with col6:
-                near_high = len(display_df[display_df["52W H Dist%"] >= -5])
-                st.metric("Near 52W High", f"{near_high}")
 
-    else:
-        st.info("👈 Configure settings and click 'RUN RS SCAN' to start")
+            # ── NEW summary metric ────────────────────────────────────
+            with col6:
+                near_high = len(df[df["52W H Dist%"] >= -5]) if "52W H Dist%" in df.columns else 0
+                st.metric("Near 52W High", f"{near_high}", help="Stocks within 5% of their 52-week high")
+            # ──────────────────────────────────────────────────────────
+
+        else:
+            st.warning("⚠️ No stocks passed filters. Try relaxing criteria.")
 
     with st.expander("ℹ️ How It Works"):
         st.markdown("""
-        **Two-Stage Filtering:**
-        1. **RS Scan**: Identifies 70-100 strongest stocks by relative strength
-        2. **Google Trends Layer** (Optional): Adds search interest conviction to RS leaders
+        **Trading Style:**
+        - **Swing (3M Focus)**: More responsive, 3-month lookback
+        - **Position (6M Focus)**: More stable, 6-month lookback
+        - **Hybrid (6M)**: Default 6-month approach
         
-        **Google Trends Conviction Score (0-100):**
-        - **75-100**: 🟢 Very High - Strong search interest + favorable divergence
-        - **60-74**: 🟡 High - Good search momentum
-        - **40-59**: ⚪ Moderate - Mixed signals
-        - **0-39**: 🔴 Low - Weak interest
+        **RS Lookback Periods:**
+        - **RS 6M (126D)**: Core long-term relative strength
+        - **RS 3M (63D)**: Medium-term momentum
+        - **RS Delta**: RS_3M minus RS_6M — positive = accelerating
         
-        **Divergence:**
-        - **Positive (+)**: Search interest rising faster than price (bullish)
-        - **Negative (-)**: Price rising faster than search (bearish)
+        **52-Week High Columns:**
+        - **52W High**: Highest intraday high over the last 252 trading days
+        - **52W H Dist%**: Distance of today's close from the 52W high
+          - 🟢 Green (≥ -5%): Near breakout territory
+          - 🟡 Yellow (-5% to -15%): Approaching the high
+          - 🔴 Red (< -15%): Far from the high
+        - ⚠️ **Stocks more than 20% below their 52W high are filtered out automatically**
         
-        **Success Rate:**
-        - Analyzing 70-100 RS leaders: 60-80% success rate
-        - Much better than full universe (0-40% success)
-        - Takes 5-8 minutes for typical RS leader count
+        **Volume Analysis:**
+        - **Vol Ratio**: Today vs 20-day average (>2x = significant)
+        - **🔥 Vol Breakout**: High volume + price near 52-week high
+        
+        **RSI Levels:**
+        - 🟢 Green (≥60): Overbought | 🔴 Red (≤40): Oversold
         """)
 
 if __name__ == "__main__":
