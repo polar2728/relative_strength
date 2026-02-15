@@ -45,8 +45,8 @@ def test_google_trends():
     try:
         st.info("🧪 Testing Google Trends API...")
         
-        # Test with a well-known term
-        pytrends = TrendReq(hl='en-US', tz=360, timeout=(10, 30), retries=3, backoff_factor=0.2)
+        # Test with a well-known term - use simpler initialization
+        pytrends = TrendReq(hl='en-US', tz=360)
         pytrends.build_payload(['Reliance'], cat=0, timeframe='today 3-m', geo='', gprop='')
         
         data = pytrends.interest_over_time()
@@ -110,14 +110,8 @@ def analyze_single_stock_trends(symbol, company_name, current_price, price_3m_ch
         
         time.sleep(base_delay)
         
-        # Initialize pytrends with more conservative settings
-        pytrends = TrendReq(
-            hl='en-US', 
-            tz=360, 
-            timeout=(15, 30),  # Longer timeouts
-            retries=3, 
-            backoff_factor=0.3  # More aggressive backoff
-        )
+        # Initialize pytrends with simpler settings to avoid compatibility issues
+        pytrends = TrendReq(hl='en-US', tz=360)
         
         # Build payload
         pytrends.build_payload([search_term], cat=0, timeframe='today 12-m', geo='', gprop='')
