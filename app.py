@@ -37,41 +37,87 @@ BENCHMARK_CANDIDATES = {
 # GOOGLE TRENDS ANALYSIS
 # ─────────────────────────────────────────────────────────────
 
+def test_google_trends():
+    """
+    Test if Google Trends API is working
+    Returns True if working, False otherwise
+    """
+    try:
+        st.info("🧪 Testing Google Trends API...")
+        
+        # Test with a well-known term
+        pytrends = TrendReq(hl='en-US', tz=360, timeout=(10, 30), retries=3, backoff_factor=0.2)
+        pytrends.build_payload(['Reliance'], cat=0, timeframe='today 3-m', geo='', gprop='')
+        
+        data = pytrends.interest_over_time()
+        
+        if data is not None and not data.empty:
+            st.success("✅ Google Trends is working! You can proceed with analysis.")
+            return True
+        else:
+            st.error("❌ Google Trends returned no data. Wait 30 minutes and try again.")
+            return False
+            
+    except Exception as e:
+        st.error(f"❌ Google Trends test failed: {str(e)[:200]}")
+        st.warning("⚠️ Possible causes: Rate limit hit, network issue, or API changes")
+        st.info("💡 Solution: Wait 30-60 minutes before trying again, or reduce concurrent usage")
+        return False
+
+
 def simplify_company_name(name):
     """Simplify company name for Google Trends search"""
     name = str(name).upper()
     
     # Remove common suffixes
     suffixes = [' LIMITED', ' LTD', ' LTD.', ' INDIA', ' PVT', ' PRIVATE', 
-                ' CORPORATION', ' CORP', ' COMPANY', ' CO', ' INDUSTRIES', ' IND']
+                ' CORPORATION', ' CORP', ' COMPANY', ' CO', ' INDUSTRIES', ' IND',
+                ' INTERNATIONAL', ' INTL']
     
     for suffix in suffixes:
         if name.endswith(suffix):
             name = name[:len(name)-len(suffix)]
-            break
     
-    # Take first 2-3 words if too long
+    # Remove noise words
+    noise_words = ['THE', 'AND', '&']
     words = name.strip().split()
-    if len(words) > 3:
+    words = [w for w in words if w not in noise_words]
+    
+    # Take first 1-2 words for better matching
+    if len(words) > 2:
         name = ' '.join(words[:2])
+    else:
+        name = ' '.join(words)
     
     return name.strip().title()  # Title case for better Google Trends match
 
 
-def analyze_single_stock_trends(symbol, company_name, current_price, price_3m_change):
+def analyze_single_stock_trends(symbol, company_name, current_price, price_3m_change, retry_count=0):
     """
     Analyze single stock with Google Trends
     Returns dict with trends metrics or None if failed
     """
+    max_retries = 2
+    
     try:
         # Simplify name for search
         search_term = simplify_company_name(company_name)
         
-        # Wait to avoid rate limits
-        time.sleep(3)
+        # Longer wait to avoid rate limits (5-7 seconds)
+        base_delay = 5
+        if retry_count > 0:
+            base_delay += retry_count * 2  # Increase delay on retries
         
-        # Initialize pytrends
-        pytrends = TrendReq(hl='en-US', tz=360, timeout=(10, 25), retries=2, backoff_factor=0.1)
+        time.sleep(base_delay)
+        
+        # Initialize pytrends with more conservative settings
+        pytrends = TrendReq(
+            hl='en-US', 
+            tz=360, 
+            timeout=(15, 30),  # Longer timeouts
+            retries=3, 
+            backoff_factor=0.3  # More aggressive backoff
+        )
         
         # Build payload
         pytrends.build_payload([search_term], cat=0, timeframe='today 12-m', geo='', gprop='')
@@ -80,6 +126,9 @@ def analyze_single_stock_trends(symbol, company_name, current_price, price_3m_ch
         trends_data = pytrends.interest_over_time()
         
         if trends_data is None or trends_data.empty:
+            if retry_count < max_retries:
+                time.sleep(10)  # Wait longer before retry
+                return analyze_single_stock_trends(symbol, company_name, current_price, price_3m_change, retry_count + 1)
             return None
         
         # Remove isPartial column
@@ -108,8 +157,6 @@ def analyze_single_stock_trends(symbol, company_name, current_price, price_3m_ch
         search_percentile = scipy_stats.percentileofscore(trends_series.values, current_interest)
         
         # Calculate divergence (trends vs price)
-        # Price slope is already in the dataframe as 3M change %
-        # We approximate: positive price_3m_change means upward slope
         price_slope_approx = price_3m_change / 3  # Rough monthly slope
         
         divergence = trends_slope_norm - price_slope_approx
@@ -137,10 +184,11 @@ def analyze_single_stock_trends(symbol, company_name, current_price, price_3m_ch
         }
         
     except Exception as e:
+        if retry_count < max_retries:
+            time.sleep(15)  # Wait even longer before retry
+            return analyze_single_stock_trends(symbol, company_name, current_price, price_3m_change, retry_count + 1)
         return None
 
-
-# Replace the loop in add_google_trends_analysis function (around line 190-230)
 
 def add_google_trends_analysis(df_rs_leaders, kite, instrument_map):
     """
@@ -156,7 +204,7 @@ def add_google_trends_analysis(df_rs_leaders, kite, instrument_map):
     """
     
     st.info(f"🔍 Adding Google Trends analysis to {len(df_rs_leaders)} RS leaders...")
-    st.warning("⏱️ This will take ~5-8 minutes for 70-100 stocks (3-5 sec per stock)")
+    st.warning("⏱️ This will take ~5-10 minutes (5-7 sec per stock with retries)")
     
     # Reset index to ensure sequential numbering
     df_rs_leaders = df_rs_leaders.reset_index(drop=True)
@@ -168,15 +216,15 @@ def add_google_trends_analysis(df_rs_leaders, kite, instrument_map):
     results = []
     successful = 0
     failed = 0
+    failed_stocks = []
     
-    # Use enumerate to get proper sequential index
+    # Use enumerate for proper sequential indexing
     for idx, (_, row) in enumerate(df_rs_leaders.iterrows()):
         symbol = row['Symbol']
         company_name = row['Name']
         
         # Get price data to calculate 3M price change
         try:
-            # Get stock data
             stock_data = st.session_state.get('stock_data', {})
             
             if f"{symbol}.NS" in stock_data:
@@ -197,8 +245,9 @@ def add_google_trends_analysis(df_rs_leaders, kite, instrument_map):
             current_price = row.get('Price', 0)
             price_3m_change = 0
         
-        # Update status
-        status_text.info(f"📊 Analyzing {idx + 1}/{len(df_rs_leaders)}: {company_name[:30]}...")
+        # Update status with live counters
+        search_term_display = simplify_company_name(company_name)
+        status_text.info(f"📊 {idx + 1}/{len(df_rs_leaders)}: {search_term_display[:30]} | ✅ {successful} | ❌ {failed}")
         
         # Analyze with Google Trends
         trends_result = analyze_single_stock_trends(
@@ -216,9 +265,10 @@ def add_google_trends_analysis(df_rs_leaders, kite, instrument_map):
             })
         else:
             failed += 1
+            failed_stocks.append(f"{symbol} ({search_term_display})")
             results.append({
                 'Symbol': symbol,
-                'Search_Term': simplify_company_name(company_name),
+                'Search_Term': search_term_display,
                 'Trends_Slope': None,
                 'Search_Percentile': None,
                 'Divergence': None,
@@ -227,35 +277,63 @@ def add_google_trends_analysis(df_rs_leaders, kite, instrument_map):
                 'Status': 'Failed'
             })
         
-        # Update progress - now idx is guaranteed to be 0, 1, 2, 3...
+        # Update progress
         progress = (idx + 1) / len(df_rs_leaders)
-        progress = min(progress, 1.0)  # Extra safety to cap at 1.0
+        progress = min(progress, 1.0)
         progress_bar.progress(progress)
         
-        if (idx + 1) % 10 == 0:
-            status_text.success(f"✅ Progress: {idx + 1}/{len(df_rs_leaders)} | Success: {successful} | Failed: {failed}")
+        # Early warning if all failing
+        if idx >= 9 and successful == 0:
+            st.error("""
+            ⚠️ **Stopping - All stocks failing**
+            
+            Google Trends is blocking all requests.
+            
+            **Action:** Wait 30-60 minutes, then try Test API again.
+            """)
+            break
     
     # Create results dataframe
     trends_df = pd.DataFrame(results)
     
-    # Merge with original RS leaders (also reset its index for clean merge)
+    # Merge with original RS leaders
     enhanced_df = df_rs_leaders.merge(trends_df, on='Symbol', how='left')
     
-    # Clear progress indicators
+    # Clear progress
     progress_bar.empty()
     status_text.empty()
     
     # Show summary
-    success_rate = (successful / len(df_rs_leaders) * 100) if len(df_rs_leaders) > 0 else 0
+    success_rate = (successful / len(results) * 100) if len(results) > 0 else 0
     
-    st.success(f"""
-    ✅ **Google Trends Analysis Complete!**
-    - Total: {len(df_rs_leaders)} stocks
-    - Successful: {successful} ({success_rate:.1f}%)
-    - Failed: {failed}
-    """)
+    if successful > 0:
+        st.success(f"""
+        ✅ **Analysis Complete!**
+        - Analyzed: {len(results)} stocks
+        - Successful: {successful} ({success_rate:.1f}%)
+        - Failed: {failed}
+        """)
+        
+        if failed > 0 and failed < len(results):
+            with st.expander(f"ℹ️ View {failed} failed stocks"):
+                for stock in failed_stocks[:20]:
+                    st.write(f"- {stock}")
+                if len(failed_stocks) > 20:
+                    st.write(f"... and {len(failed_stocks) - 20} more")
+    else:
+        st.error("""
+        ❌ **All requests failed**
+        
+        **Why:** API rate limit or temporary block
+        
+        **Solutions:**
+        1. Wait 30-60 minutes
+        2. Try off-peak hours (2-6 AM IST)
+        3. Use RS results alone (still excellent!)
+        """)
     
     return enhanced_df
+
 
 # ─────────────────────────────────────────────────────────────
 # KITE CONNECT OAUTH AUTHENTICATION
@@ -1040,16 +1118,32 @@ def main():
 
         st.markdown(f"### 🎯 Top RS Leaders (≥ {min_rs}%) :green[Found **{len(df)} stocks**]")
         
-        # Add Google Trends Analysis button
+        # Add Google Trends Analysis section
         st.markdown("---")
-        col_trend1, col_trend2 = st.columns([2, 1])
+        st.markdown("#### 🔍 Google Trends Conviction Layer (Optional)")
         
-        with col_trend1:
-            st.markdown("#### 🔍 Add Google Trends Conviction Layer")
-            st.info(f"Enhance {len(df)} RS leaders with search interest analysis (~5-8 min)")
+        col_info, col_test, col_analyze = st.columns([2, 1, 1])
         
-        with col_trend2:
-            if st.button("🚀 ADD TRENDS ANALYSIS", use_container_width=True, type="primary"):
+        with col_info:
+            st.info(f"Enhance {len(df)} RS leaders with search interest analysis")
+            st.caption("⏱️ Takes ~5-10 minutes (5-7 sec per stock)")
+        
+        with col_test:
+            if st.button("🧪 Test API", use_container_width=True):
+                test_result = test_google_trends()
+                if test_result:
+                    st.session_state.trends_api_working = True
+                else:
+                    st.session_state.trends_api_working = False
+        
+        with col_analyze:
+            # Only enable if not tested or if test passed
+            api_status = st.session_state.get('trends_api_working', None)
+            
+            if api_status is False:
+                st.button("🚀 ADD TRENDS", use_container_width=True, disabled=True, 
+                         help="API test failed. Wait 30 min and test again.")
+            elif st.button("🚀 ADD TRENDS", use_container_width=True, type="primary"):
                 # Add Google Trends analysis
                 enhanced_df = add_google_trends_analysis(
                     df, 
@@ -1060,6 +1154,25 @@ def main():
                 # Store enhanced results
                 st.session_state.enhanced_results = enhanced_df
                 st.rerun()
+        
+        # Tips if API test failed
+        if api_status is False:
+            st.warning("""
+            ⚠️ **Google Trends API is currently unavailable**
+            
+            **Why this happens:**
+            - Rate limits (too many requests)
+            - Temporary API blocks
+            - Network issues
+            
+            **What to do:**
+            1. Wait 30-60 minutes
+            2. Try during off-peak hours (2-6 AM IST)
+            3. Test again with 🧪 Test API button
+            4. Use RS results alone (they're still valuable!)
+            
+            **Alternative:** Your RS scan results are already excellent for trading decisions!
+            """)
         
         # Display enhanced results if available
         if 'enhanced_results' in st.session_state:
