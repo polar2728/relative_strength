@@ -140,6 +140,8 @@ def analyze_single_stock_trends(symbol, company_name, current_price, price_3m_ch
         return None
 
 
+# Replace the loop in add_google_trends_analysis function (around line 190-230)
+
 def add_google_trends_analysis(df_rs_leaders, kite, instrument_map):
     """
     Add Google Trends analysis to filtered RS leaders
@@ -156,6 +158,9 @@ def add_google_trends_analysis(df_rs_leaders, kite, instrument_map):
     st.info(f"🔍 Adding Google Trends analysis to {len(df_rs_leaders)} RS leaders...")
     st.warning("⏱️ This will take ~5-8 minutes for 70-100 stocks (3-5 sec per stock)")
     
+    # Reset index to ensure sequential numbering
+    df_rs_leaders = df_rs_leaders.reset_index(drop=True)
+    
     # Create progress tracking
     progress_bar = st.progress(0)
     status_text = st.empty()
@@ -164,7 +169,8 @@ def add_google_trends_analysis(df_rs_leaders, kite, instrument_map):
     successful = 0
     failed = 0
     
-    for idx, row in df_rs_leaders.iterrows():
+    # Use enumerate to get proper sequential index
+    for idx, (_, row) in enumerate(df_rs_leaders.iterrows()):
         symbol = row['Symbol']
         company_name = row['Name']
         
@@ -221,8 +227,9 @@ def add_google_trends_analysis(df_rs_leaders, kite, instrument_map):
                 'Status': 'Failed'
             })
         
-        # Update progress
+        # Update progress - now idx is guaranteed to be 0, 1, 2, 3...
         progress = (idx + 1) / len(df_rs_leaders)
+        progress = min(progress, 1.0)  # Extra safety to cap at 1.0
         progress_bar.progress(progress)
         
         if (idx + 1) % 10 == 0:
@@ -231,7 +238,7 @@ def add_google_trends_analysis(df_rs_leaders, kite, instrument_map):
     # Create results dataframe
     trends_df = pd.DataFrame(results)
     
-    # Merge with original RS leaders
+    # Merge with original RS leaders (also reset its index for clean merge)
     enhanced_df = df_rs_leaders.merge(trends_df, on='Symbol', how='left')
     
     # Clear progress indicators
@@ -249,7 +256,6 @@ def add_google_trends_analysis(df_rs_leaders, kite, instrument_map):
     """)
     
     return enhanced_df
-
 
 # ─────────────────────────────────────────────────────────────
 # KITE CONNECT OAUTH AUTHENTICATION
